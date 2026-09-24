@@ -1,0 +1,148 @@
+FFmpeg — written offer of corresponding source code
+===================================================
+
+Written offer under GNU Lesser General Public License v2.1, Section 6
+--------------------------------------------------------------------
+
+MacauSplat for Windows x64 distributes FFmpeg and FFprobe as shared
+executables together with the required shared libraries (the "Object Code"):
+
+  Component:            FFmpeg (ffmpeg.exe, ffprobe.exe)
+  Reported version:     n8.1.2-44-g7c533d0f86-20260821
+  Distribution used:    BtbN FFmpeg-Builds variant win64-lgpl-shared, series 8.1
+  Distribution date:    2026-08-21 (autobuild-2026-08-21-13-40)
+  Distributed by:       Linference, publisher of MacauSplat
+  Object Code location: engines/ffmpeg/ inside the MacauSplat Windows
+                        installer, and the corresponding resources of the
+                        installed application
+  License:              LGPL-2.1-or-later (COPYING.LGPLv2.1 in the source)
+  License text:         licenses/FFmpeg-LGPL-2.1.txt
+
+The Object Code is a work that uses the FFmpeg library. In accordance with
+LGPL v2.1 Section 6, and in addition to the source-code pointers published by
+the distributor of the Object Code, Linference hereby offers to provide the
+complete corresponding machine-readable source code for the FFmpeg library
+exactly as it was built into this Object Code.
+
+How to obtain the corresponding source
+--------------------------------------
+
+1. Exact upstream source snapshot (preferred; smallest download, and the
+   snapshot revision is recorded verbatim in the shipped binary's version
+   string and therefore verifiable offline): the FFmpeg project distributes a
+   generated source archive for every commit:
+
+     https://github.com/FFmpeg/FFmpeg/archive/7c533d0f86f13a06ec93968f6194349665b3536a.tar.gz
+
+   Snapshot commit:  7c533d0f86f13a06ec93968f6194349665b3536a
+   Snapshot date:    2026-08-14
+   Verify with:      the version string reported by the shipped binary, i.e.
+                     `engines\ffmpeg\ffmpeg.exe -version` prints
+                     "n8.1.2-44-g7c533d0f86-20260821", whose "-g7c533d0f86"
+                     field is this commit abbreviation.
+
+2. Official release source archive for the 8.1.2 release this snapshot is
+   based on:
+
+     https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
+     Size:    11,710,924 bytes
+     SHA-256: 464BEB5E7BF0C311E68B45AE2F04E9CC2AF88851ABB4082231742A74D97B524C
+
+   This is the same archive and the same SHA-256 value that
+   engines/manifest.macos.json pins for the macOS arm64 engine build
+   (engines[0].sourceUrl / engines[0].sourceSha256). The value is therefore
+   recorded in two independent places in this repository and can be checked
+   offline against the manifest.
+
+3. Complete upstream version-control history:
+
+     https://github.com/FFmpeg/FFmpeg
+     git clone https://github.com/FFmpeg/FFmpeg.git
+     git checkout 7c533d0f86f13a06ec93968f6194349665b3536a
+
+If any of the addresses above becomes unavailable, Linference will supply the
+corresponding source on request, either by a download location at no charge or
+on a physical medium for no more than the cost of performing the distribution.
+Requests may be opened at:
+
+  https://github.com/Linference/MacauSplat/issues
+
+This offer is valid for as long as MacauSplat distributes the Object Code and
+for three years afterwards, and it covers every recipient of the Object Code.
+
+How this Object Code was built
+------------------------------
+
+The Object Code was not built by Linference. It is an unmodified, redistributed
+official build produced by the BtbN/FFmpeg-Builds project. The build recipe is
+therefore the upstream recipe, and every file in it is publicly retrievable and
+pinned by the archive hash below:
+
+  Archive:  https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-21-13-40/ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip
+  SHA-256:  e30201900132c0e3da178c63c7dac65aa0a0dcd971779546ae964b86b47bd499
+
+  This SHA-256 is the same value recorded in engines/manifest.json
+  (engines[0].archiveSha256) and is verified by `npm run setup:engines:windows`
+  before the archive is extracted.
+
+  Variant definition:   variants/win64-lgpl-shared.sh
+  Variant defaults:     variants/defaults-lgpl-shared.sh, variants/defaults-lgpl.sh
+                        (FF_CONFIGURE="--enable-version3 --disable-debug",
+                        GIT_BRANCH=master, LICENSE_FILE=COPYING.LGPLv3)
+  Shared packaging:     variants/windows-install-shared.sh
+  Recipe entry point:   build.sh
+  Third-party deps:     scripts.d/ (one script per dependency)
+
+  Recipe retrieval (master branch), with the SHA-256 of each retrieved file at
+  the time this notice was written:
+
+    build.sh                              76D3D01F72ABA007D91B91BE3D99ACFBF23E0CADAA8D18E6BD2D9B306AB74A4D
+    variants/win64-lgpl-shared.sh         (2 lines: sources windows-install-shared.sh
+                                            and defaults-lgpl-shared.sh)
+    variants/defaults-lgpl-shared.sh
+    variants/defaults-lgpl.sh
+    variants/windows-install-shared.sh
+    scripts.d/25-fribidi.sh               8C49596458E13A33FFD24DCCF93FCB17304B8B0929E5A1457FAB55BA9E26C1CD
+
+  The recipe files live on a moving branch, so their hashes are recorded here
+  for reference only and are NOT enforced by the build, unlike the archive
+  SHA-256 above.
+
+  Exact configure invocation: the shipped executable prints the complete,
+  verbatim configure line. It is the authoritative record of this build:
+
+    engines\ffmpeg\ffmpeg.exe -buildconf
+
+  The emitted line starts with:
+
+    --prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config
+    --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32
+    --enable-version3 --disable-debug --enable-shared --disable-static ...
+
+  Toolchain, as reported by the shipped executable: gcc 15.2.0
+  (crosstool-NG 1.28.0.23_185f348).
+
+License scope of this build
+---------------------------
+
+The variant enables --enable-version3 and therefore builds FFmpeg under the
+LGPL version 3 or later, which is a permitted "or later" option of
+LGPL-2.1-or-later. This distribution declares LGPL-2.1-or-later, matching the
+manifest and licenses/THIRD_PARTY_NOTICES.txt.
+
+The build disables GPL and nonfree components. The configure line printed by
+`ffmpeg.exe -buildconf` confirms this: it contains no --enable-gpl and no
+--enable-nonfree, and it explicitly disables the GPL-only encoders
+(--disable-libx264, --disable-libx265, --disable-libxvid, --disable-libdavs2,
+--disable-libxavs2, --disable-libfdk-aac).
+
+Relinking (LGPL v2.1 Section 6(b))
+----------------------------------
+
+The FFmpeg library is used as a shared library (DLLs shipped alongside
+ffmpeg.exe and ffprobe.exe). Users may modify FFmpeg and relink it with the
+application by replacing the shipped FFmpeg DLLs with their own build of the
+same shared-library ABI.
+
+This document does not modify any license and is not itself a license grant.
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.

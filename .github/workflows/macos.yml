@@ -15,17 +15,20 @@ concurrency:
 jobs:
   test-and-build:
     runs-on: macos-15
-    timeout-minutes: 360
+    # No from-source FFmpeg/COLMAP build here anymore: this workflow consumes
+    # the pinned engine archive. The slow 6-hour from-source build lives in
+    # .github/workflows/macos-engines.yml.
+    timeout-minutes: 120
     env:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
@@ -52,22 +55,59 @@ jobs:
           npm run build
           npm run verify:licenses
 
+      # actions/cache@v5 deprecated `save-always`, which also never runs when an
+      # earlier step failed. Restore here and save explicitly at the end of the
+      # job with `if: always()`.
       - name: Restore macOS build caches
-        uses: actions/cache@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/Library/Caches/Homebrew
             .cache/ccache
             .cache/macos-engine-build/sources
           key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}
-          save-always: true
+          restore-keys: macos-15-arm64-engines-
 
-      - name: Install engine build prerequisites
-        run: bash scripts/setup-macos-build-deps.sh
+      # Obtain the pinned arm64 engine runtime instead of rebuilding it.
+      # Primary path: setup:engines:macos downloads distribution.sourceUrl
+      # (a release asset of this project) and verifies its SHA-256.
+      # Fallback: fetch the pinned `distribution.tag` release asset with the
+      # GitHub CLI and re-run setup against that local archive, so a transient
+      # download/CDN failure does not fail the whole workflow.
+      - name: Obtain bundled arm64 engines
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if npm run setup:engines:macos; then
+            echo "Engines installed from the pinned distribution URL."
+          else
+            echo "::warning::setup:engines:macos download failed; retrying via the pinned release tag."
+            cache="${GITHUB_WORKSPACE}/.cache/engines/macos"
+            mkdir -p "$cache"
+            engine_tag="$(node -e 'console.log(require("./engines/manifest.macos.json").distribution.tag)')"
+            marker="$(mktemp)"
+            gh release download "$engine_tag" \
+              --repo Linference/MacauSplat \
+              --pattern '*.tar.xz*' \
+              --dir "$cache" \
+              --clobber
+            archive="$(find "$cache" -maxdepth 1 -type f -name '*.tar.xz' -newer "$marker" -print -quit)"
+            if [ -z "$archive" ]; then
+              archive="$(find "$cache" -maxdepth 1 -type f -name '*.tar.xz' -print -quit)"
+            fi
+            test -n "$archive"
+            echo "Using locally restored engine archive: $archive"
+            OOOSPLAT_MACOS_ENGINE_ARCHIVE="$archive" npm run setup:engines:macos
+          fi
+          runtime="${GITHUB_WORKSPACE}/engines/macos/arm64"
+          for binary in ffmpeg ffprobe colmap brush_app; do
+            test -x "$runtime/bin/$binary"
+          done
+          npm run verify:engines:macos
 
-      - name: Build and verify bundled arm64 engines
-        run: npm run build:engines:macos
-
+      # REQUIRED before `tauri build`: tauri-build checks bundle.externalBin and
+      # the staged CLI is gitignored, so a clean checkout has to run this.
       - name: Stage CLI for externalBin
         run: npm run stage:cli
 
@@ -102,17 +142,29 @@ jobs:
           app="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
           version="${{ steps.package.outputs.version }}"
-          app_archive="OOOSplat-${version}-arm64-macos.app.zip"
-          dmg_name="OOOSplat-${version}-arm64-macos.dmg"
+          app_archive="MacauSplat-${version}-arm64-macos.app.zip"
+          dmg_name="MacauSplat-${version}-arm64-macos.dmg"
           mkdir -p dist-artifacts
           ditto -c -k --sequesterRsrc --keepParent "$app" "dist-artifacts/$app_archive"
           cp "$dmg" "dist-artifacts/$dmg_name"
           (cd dist-artifacts && shasum -a 256 "$app_archive" "$dmg_name" > SHA256SUMS.txt)
 
       - name: Upload unsigned macOS Alpha
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: OOOSplat-${{ steps.package.outputs.version }}-arm64-macos
+          name: MacauSplat-${{ steps.package.outputs.version }}-arm64-macos
           path: dist-artifacts/
           if-no-files-found: error
           retention-days: 14
+
+      # Must come after the expensive steps; `if: always()` makes the save happen
+      # even when a later step failed.
+      - name: Save macOS build caches
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            .cache/ccache
+            .cache/macos-engine-build/sources
+          key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}

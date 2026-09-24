@@ -1221,14 +1221,67 @@ pub async fn export_ply(source_path: String, destination_path: String) -> Result
 mod tests {
     use super::{
         classify_pipeline_failure, contains_mp4_ftyp, create_preview_asset,
-        next_gaussian_video_path, preview_client_path, write_gaussian_video,
+        next_gaussian_video_path, preview_client_path, write_gaussian_video, AnnotationOutcome,
         GaussianVideoExportSession, PipelineCommandError,
     };
     use crate::error::SplatError;
     use crate::pipeline::{PipelineEngine, PipelineStage};
+    use crate::reconstruction::autolabel::UpAxisSource;
     use std::{fs, path::Path};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    /// 自動標註的 IPC 契約：介面端（`src/types/pipeline.ts`）讀的是 camelCase，
+    /// 而上軸語意必須用 `upSource` 表達三種來源，不能退回一個含糊的布林。
+    #[test]
+    fn annotation_outcome_exposes_camel_case_fields_and_the_up_axis_source() {
+        let outcome = AnnotationOutcome {
+            output_dir: "C:/p/annotation".into(),
+            qa_html: "C:/p/annotation/qa.html".into(),
+            frames_total: 30,
+            frames_accepted: 24,
+            acceptance_ratio: 0.8,
+            box_size: [1.0, 2.0, 3.0],
+            box_center: [0.0; 3],
+            up_source: UpAxisSource::WorldY,
+            up_axis_may_be_wrong: true,
+            labels_written: 24,
+            labels_removed: 3,
+            rejection_reasons: vec![("可見角點僅 # 個".into(), 6)],
+            warnings: vec![("相機模型 OpenCvFisheye 為魚眼".into(), 24)],
+        };
+        let value = serde_json::to_value(&outcome).unwrap();
+        for key in [
+            "outputDir",
+            "qaHtml",
+            "framesTotal",
+            "framesAccepted",
+            "acceptanceRatio",
+            "boxSize",
+            "boxCenter",
+            "upSource",
+            "upAxisMayBeWrong",
+            "labelsWritten",
+            "labelsRemoved",
+            "rejectionReasons",
+            "warnings",
+        ] {
+            assert!(value.get(key).is_some(), "缺少欄位 {key}：{value}");
+        }
+        assert_eq!(value["upSource"], "worldY");
+        assert_eq!(value["labelsRemoved"], 3);
+        assert_eq!(value["upAxisMayBeWrong"], true);
+
+        // 三種來源都要有穩定的字串識別（介面用它決定要不要顯示警告）
+        assert_eq!(
+            serde_json::to_value(UpAxisSource::CameraTrajectory).unwrap(),
+            "cameraTrajectory"
+        );
+        assert_eq!(
+            serde_json::to_value(UpAxisSource::Manual).unwrap(),
+            "manual"
+        );
+    }
 
     #[test]
     fn pipeline_errors_have_stable_machine_readable_codes() {
@@ -1422,7 +1475,13 @@ pub async fn list_project_snapshots(
 }
 
 /// 自動標註的結果摘要（回傳給介面顯示）。
+///
+/// `rename_all = "camelCase"`：本模組其他 IPC 結構都是 camelCase，介面端
+/// （`src/types/pipeline.ts` 的 `AnnotationOutcome`）也是照 camelCase 寫的；
+/// 先前少了這一行，`framesAccepted` 這類欄位在介面上會永遠是 `undefined`
+/// （只有這一個結構漏掉，屬於既有的介面／後端不一致）。
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnnotationOutcome {
     /// 輸出目錄（標籤、明細、複核表都在這裡）。
     pub output_dir: String,
@@ -1434,11 +1493,27 @@ pub struct AnnotationOutcome {
     /// 擬合出的包圍盒尺寸（公尺）。
     pub box_size: [f64; 3],
     pub box_center: [f64; 3],
-    /// 上軸是否為推定值（相機軌跡退化時為真）。
-    pub up_axis_estimated: bool,
+    /// 上軸的來源（`cameraTrajectory`／`worldY`／`manual`）。
+    ///
+    /// 為什麼不是布林：舊欄位 `up_axis_estimated` 的 `true` 其實代表「退回世界 Y 軸」，
+    /// 但名字讀起來像「這是推定出來的值」，介面文案因此也照著錯的意思寫。
+    /// 現在介面可以直接分辨「由軌跡推定」與「推定失敗的後備值」。
+    pub up_source: crate::reconstruction::autolabel::UpAxisSource,
+    /// 上軸是否屬於「可能不準」的來源（等價於 `up_source == WorldY`）。
+    ///
+    /// 保留這個方便的布林，是為了讓介面不必自己重寫一次判斷；
+    /// 它是由 `up_source` 推導出來的，不會有兩份真相。
+    pub up_axis_may_be_wrong: bool,
     pub labels_written: usize,
+    /// 這次重跑清掉的舊標籤數（上次採用、這次略過的影格）。
+    ///
+    /// 為什麼要回報：YOLO 的慣例是「沒有標籤檔 = 背景」，
+    /// 若重跑時沒有清掉舊標籤，被略過的影格就會變成憑空多出的正樣本。
+    pub labels_removed: usize,
     /// 未採用的原因分佈。
     pub rejection_reasons: Vec<(String, usize)>,
+    /// 被採用但帶有警示的影格分佈（例如相機為魚眼、投影僅近似）。
+    pub warnings: Vec<(String, usize)>,
 }
 
 /// 對已完成的專案執行自動標註：擬合三維包圍盒 → 投影到每張影格 → 輸出 YOLO 標籤。
@@ -1455,6 +1530,7 @@ pub async fn annotate_project(
         write_qa_html, write_yolo_labels, AnnotateOptions, FitOptions,
     };
     use crate::reconstruction::colmap::SparseReconstruction;
+    use crate::reconstruction::inspect;
 
     let project = PathBuf::from(project_path);
     // 解析與投影是 CPU 密集的阻塞工作，放到阻塞執行緒避免卡住事件迴圈
@@ -1464,14 +1540,16 @@ pub async fn annotate_project(
             .or_else(|_| SparseReconstruction::load(&project))
             .map_err(|e| SplatError::Process(format!("讀取稀疏重建失敗：{e}")))?;
         let box3d = fit_box_from_points(&reconstruction, &FitOptions::default())
-            .ok_or_else(|| SplatError::Process("點雲不足，無法自動擬合包圍盒".into()))?;
+            .map_err(|e| SplatError::Process(format!("自動擬合包圍盒失敗：{e}")))?;
         let annotations =
             annotate_reconstruction(&reconstruction, &box3d, &AnnotateOptions::default());
-        let summary = summarize(&annotations);
+        let mut summary = summarize(&annotations);
 
         let output_dir = project.join("annotation");
         std::fs::create_dir_all(&output_dir)?;
-        let labels_written = write_yolo_labels(output_dir.join("labels"), &annotations, class_id)?;
+        let labels = write_yolo_labels(output_dir.join("labels"), &annotations, class_id)?;
+        // 把「清掉幾個舊標籤」併進摘要，讓 QA 表與介面都看得到這個差異
+        summary.labels_removed = labels.removed;
         std::fs::write(
             output_dir.join("annotations.json"),
             serde_json::to_string_pretty(&annotations)?,
@@ -1480,15 +1558,11 @@ pub async fn annotate_project(
         let box_path = output_dir.join("box.json");
         std::fs::write(&box_path, serde_json::to_string_pretty(&box3d)?)?;
         let qa_html = output_dir.join("qa.html");
-        // 複核表的影格路徑相對於輸出目錄
-        write_qa_html(
-            &qa_html,
-            "../work/frames",
-            &annotations,
-            &summary,
-            &box3d,
-            60,
-        )?;
+        // 複核表的影格連結必須指向**實際存在的**影格目錄（三個候選之一），
+        // 而不是寫死 `../work/frames`——否則影格放在 source/images 的專案會整頁破圖。
+        let frames_href = inspect::frames_href(&project, &output_dir)
+            .unwrap_or_else(|| inspect::FALLBACK_FRAMES_HREF.to_string());
+        write_qa_html(&qa_html, &frames_href, &annotations, &summary, &box3d, 60)?;
 
         Ok(AnnotationOutcome {
             output_dir: output_dir.display().to_string(),
@@ -1498,9 +1572,12 @@ pub async fn annotate_project(
             acceptance_ratio: summary.acceptance_ratio,
             box_size: box3d.size,
             box_center: box3d.center,
-            up_axis_estimated: box3d.up_axis_estimated,
-            labels_written,
+            up_source: box3d.up_source,
+            up_axis_may_be_wrong: box3d.up_source.is_estimated(),
+            labels_written: labels.written,
+            labels_removed: labels.removed,
             rejection_reasons: summary.rejection_reasons,
+            warnings: summary.warnings,
         })
     })
     .await

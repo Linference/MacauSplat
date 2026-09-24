@@ -17,9 +17,80 @@
 //! 解析器全部是純函式（輸入日誌文字、輸出結構），因此可以用合成日誌做單元測試，
 //! 不需要真的跑一次重建就能驗證格式是否對得上。
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+
+/// 每次刷新時，`colmap.log` 最多讀取的尾端位元組數。
+///
+/// 為什麼要有上限：這個頁面每兩秒重新產生一次，而 COLMAP 的 mapper 階段
+/// 每張影像會輸出數十行；上萬張影格的專案，`colmap.log` 可以到數十 MB。
+/// 每次刷新都整份讀進來（再配置一個同樣大的 `String`）毫無必要——
+/// 畫面要的只是「最後的狀態」。
+const COLMAP_LOG_TAIL_BYTES: u64 = 1024 * 1024;
+/// `ffmpeg.log` 更小，而且只需要最後一次的 `frame=`／`speed=`。
+const FFMPEG_LOG_TAIL_BYTES: u64 = 64 * 1024;
+
+/// 日誌尾端的讀取結果。
+#[derive(Debug, Clone, Default)]
+pub struct LogWindow {
+    /// 讀到的文字（開頭可能被截掉半行，已對齊到換行邊界）。
+    pub text: String,
+    /// 是否因為超過上限而截掉了開頭。
+    ///
+    /// 為什麼要回報：`feature_images` 這類**累計**計數是數整份日誌的行數，
+    /// 尾端讀取看不到前面的階段；此時 0 的意思是「讀不到」而不是「沒有」，
+    /// 顯示時必須區分開來（見 `render_html`）。
+    pub truncated: bool,
+}
+
+/// 讀取日誌的尾端（最多 `max_bytes` 位元組）。
+///
+/// 三個細節：
+///   - 開頭若落在半行中間，會捨棄那半行，避免解析到殘缺的欄位
+///     （整份尾端剛好只有一行且被截斷時，結果會是空的——寧可讀不到，也不要讀到半行）；
+///   - `max_bytes == 0` 表示不設上限（整份讀取），保留給測試與小型日誌使用；
+///   - 所有讀取都走**同一個** `BufReader`。先 seek 再用另一個 handle 讀是經典陷阱：
+///     緩衝區已經預讀掉的位元組會憑空消失（原本的檔案游標已經被推到緩衝區末端）。
+pub fn read_log_tail(path: &Path, max_bytes: u64) -> LogWindow {
+    let Ok(file) = File::open(path) else {
+        return LogWindow::default();
+    };
+    let Ok(length) = file.metadata().map(|m| m.len()) else {
+        return LogWindow::default();
+    };
+    if length == 0 {
+        return LogWindow::default();
+    }
+    let offset = if max_bytes == 0 {
+        0
+    } else {
+        length.saturating_sub(max_bytes)
+    };
+    let truncated = offset > 0;
+    let mut reader = std::io::BufReader::new(file);
+    if offset > 0 {
+        // 丟掉被截斷的第一行：從 offset 開始找到第一個換行
+        use std::io::{BufRead, Seek, SeekFrom};
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            return LogWindow::default();
+        }
+        let mut discarded = Vec::new();
+        if reader.read_until(b'\n', &mut discarded).is_err() {
+            return LogWindow::default();
+        }
+    }
+    let mut buffer = Vec::new();
+    if reader.read_to_end(&mut buffer).is_err() {
+        return LogWindow::default();
+    }
+    LogWindow {
+        text: String::from_utf8_lossy(&buffer).into_owned(),
+        truncated,
+    }
+}
 
 /// FFmpeg 抽幀進度。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -62,6 +133,12 @@ pub struct ColmapProgress {
     pub best_points: usize,
     /// 中間快照數量（`--Mapper.snapshot_path` 產生的）。
     pub snapshots: usize,
+    /// 日誌開頭是否被截掉（`read_log_tail` 的結果）。
+    ///
+    /// 為什麼要回報：`feature_images` 是**累計**值（數整份日誌的行數）。
+    /// 尾端讀取看不到前面的階段時，它會是 0——但那代表「讀不到」而不是「沒有」，
+    /// 直接顯示 0 會誤導觀眾（畫面會顯示「特徵抽取 0 張」，而實際上早就抽完了）。
+    pub log_truncated: bool,
 }
 
 /// Brush 訓練進度（Brush 不寫進度到日誌，因此只有參數與耗時）。
@@ -201,6 +278,11 @@ pub fn parse_colmap_progress(text: &str) -> ColmapProgress {
 }
 
 /// 解析 Brush 的日誌（只有命令列參數與結束狀態；進度要看 Brush 視窗）。
+///
+/// `running` 的定義是唯一的：**有 `--total-steps` 但還沒有 `elapsed_ms`**。
+/// 呼叫端只需要讀 `running`，不要自己再拼一次同樣的條件
+/// （舊版在 `read_snapshot` 裡重寫了一次 `total_steps.is_some() && elapsed_ms.is_none()`，
+/// 兩處條件一旦有一邊改了就會不一致）。
 pub fn parse_brush_progress(text: &str, model_exists: bool) -> BrushProgress {
     let mut p = BrushProgress::default();
     let mut expect_value: Option<String> = None;
@@ -229,25 +311,30 @@ pub fn parse_brush_progress(text: &str, model_exists: bool) -> BrushProgress {
     p
 }
 
-/// 讀取 COLMAP 最終模型中的已註冊影像數（`images.bin` 的前 8 位元組就是個數）。
+/// 讀取 COLMAP 最終模型中的已註冊影像數（`images.bin` 的**前 8 位元組**就是個數）。
 ///
-/// 這比解析日誌精確得多：日誌反映的是「過程」（含失敗重試），
-/// 模型檔反映的是「結果」。而且只讀 8 位元組，成本極低，適合每兩秒刷新一次。
+/// 這比解析日誌精確得多：日誌反映的是「過程」（含失敗重試），模型檔反映的是「結果」。
+///
+/// 只讀 8 位元組：這個函式每兩秒被呼叫一次，而 `images.bin` 動輒數十 MB
+/// （每張影像都帶著數千個特徵點）。舊版用 `std::fs::read` 把整個檔案讀進記憶體，
+/// 只為了看開頭那 8 位元組——純粹是浪費，而且會讓點雲還沒長大時就先卡在 I/O。
 pub fn count_model_images(project_dir: &Path) -> Option<usize> {
     for rel in [
         "work/colmap/sparse/0/images.bin",
         "work/colmap/images.bin",
         "sparse/0/images.bin",
     ] {
-        let p = project_dir.join(rel);
-        if let Ok(bytes) = std::fs::read(&p) {
-            if bytes.len() >= 8 {
-                let n = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
-                // 合理性檢查：避免讀到非 COLMAP 檔
-                if n > 0 && n < 10_000_000 {
-                    return Some(n as usize);
-                }
-            }
+        let Ok(mut file) = File::open(project_dir.join(rel)) else {
+            continue;
+        };
+        let mut header = [0u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            continue;
+        }
+        let n = u64::from_le_bytes(header);
+        // 合理性檢查：避免讀到非 COLMAP 檔
+        if n > 0 && n < 10_000_000 {
+            return Some(n as usize);
         }
     }
     None
@@ -257,15 +344,12 @@ pub fn count_model_images(project_dir: &Path) -> Option<usize> {
 pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
     let project_dir = project_dir.as_ref();
     let logs = project_dir.join("logs");
-    let read = |name: &str| std::fs::read_to_string(logs.join(name)).unwrap_or_default();
 
-    let frames_dir = ["work/frames", "frames", "source/images"]
-        .iter()
-        .map(|p| project_dir.join(p))
-        .find(|p| p.is_dir());
+    // 影格目錄的三個候選位置集中在 inspect 模組（QA 表也用同一份清單）
+    let frames_dir = crate::reconstruction::inspect::frames_directory(project_dir);
     let mut frames: Vec<(std::time::SystemTime, String)> = Vec::new();
-    if let Some(dir) = &frames_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+    if let Some(relative) = &frames_dir {
+        if let Ok(entries) = std::fs::read_dir(project_dir.join(relative)) {
             for e in entries.flatten() {
                 if e.path().is_file() {
                     let t = e
@@ -280,8 +364,11 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
     frames.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
     let newest_frames: Vec<String> = frames.iter().take(12).map(|(_, n)| n.clone()).collect();
 
-    let ffmpeg = parse_ffmpeg_progress(&read("ffmpeg.log"));
-    let mut colmap = parse_colmap_progress(&read("colmap.log"));
+    let ffmpeg =
+        parse_ffmpeg_progress(&read_log_tail(&logs.join("ffmpeg.log"), FFMPEG_LOG_TAIL_BYTES).text);
+    let window = read_log_tail(&logs.join("colmap.log"), COLMAP_LOG_TAIL_BYTES);
+    let mut colmap = parse_colmap_progress(&window.text);
+    colmap.log_truncated = window.truncated;
     // 模型檔是「結果」，日誌是「過程」：能讀到模型就改用精確值。
     colmap.registered_source = "log".into();
     if let Some(n) = count_model_images(project_dir) {
@@ -291,7 +378,10 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
     }
     let model_path = project_dir.join("work/brush/final.ply.tmp");
     let final_ply_path = project_dir.join("final.ply");
-    let brush = parse_brush_progress(&read("brush.log"), model_path.is_file());
+    let brush = parse_brush_progress(
+        &read_log_tail(&logs.join("brush.log"), FFMPEG_LOG_TAIL_BYTES).text,
+        model_path.is_file(),
+    );
 
     // 中間快照數量（若重建時啟用了 --Mapper.snapshot_path）
     let snap_dir = project_dir.join("work/colmap/sparse/snapshots");
@@ -301,8 +391,18 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
 
     let stage = if final_ply_path.is_file() {
         "完成（final.ply 已產出）".to_string()
-    } else if brush.running || brush.total_steps.is_some() && !brush.elapsed_ms.is_some() {
+    } else if brush.running {
+        // `parse_brush_progress` 已經把 running 定義成
+        // 「有 --total-steps 但還沒有 elapsed_ms」，不需要在這裡重寫一次同樣的條件
         "Brush 訓練中（三維畫面請看 Brush 視窗）".to_string()
+    } else if brush.produced_model {
+        // 模型已產出但還沒發佈成 final.ply：這也是 Brush 階段，
+        // 否則畫面會退回顯示「COLMAP 建圖中」，與事實不符
+        "Brush 訓練完成，正在發佈模型".to_string()
+    } else if brush.elapsed_ms.is_some() {
+        // Brush 已經結束（日誌有結束時間）卻沒有模型：這是失敗的形狀，
+        // 但至少要說對階段，不能回頭說 COLMAP 還在建圖。
+        "Brush 已結束（尚未產出模型）".to_string()
     } else if colmap.command.as_deref() == Some("mapper") && colmap.registered_images > 0 {
         format!(
             "COLMAP 建圖中（已註冊 {} 張{}、{} 個三維點）",
@@ -400,6 +500,16 @@ pub fn render_html(
         .final_ply
         .map(|b| format!("{:.1} MB", b as f64 / 1048576.0))
         .unwrap_or_else(|| "—".into());
+    // 特徵抽取的張數是「數日誌行數」的累計值：日誌被截斷時它會是 0，
+    // 但那代表「讀不到」而不是「沒有」，必須顯示成後者才不會誤導。
+    let feature_summary = if snap.colmap.log_truncated && snap.colmap.feature_images == 0 {
+        "—（日誌已截斷，讀不到較早的階段）".to_string()
+    } else {
+        format!(
+            "{} 張（最後一張 {} 點）",
+            snap.colmap.feature_images, snap.colmap.last_feature_count
+        )
+    };
     // 階段顯示以 final_ply 的存在為準（單一真相來源）：只要最終模型已產出，
     // 不論 snapshot 是何時建立的，畫面都必須顯示「完成」，避免顯示與資料不一致。
     let stage_display = match snap.final_ply {
@@ -450,7 +560,7 @@ pub fn render_html(
   </div>
   <div class="card"><h2>COLMAP / Brush 狀態</h2>
     <div class="row"><div class="lab">COLMAP 子命令</div><div class="num" style="width:auto">{colmap_stage}</div></div>
-    <div class="row"><div class="lab">特徵抽取</div><div class="num" style="width:auto">{feature_images} 張（最後一張 {last_feat} 點）</div></div>
+    <div class="row"><div class="lab">特徵抽取</div><div class="num" style="width:auto">{feature_summary}</div></div>
     <div class="row"><div class="lab">Brush 狀態</div><div class="num" style="width:auto">{brush_state}</div></div>
     <div class="row"><div class="lab">訓練步數設定</div><div class="num" style="width:auto">{brush_steps} 步 / 最大 {brush_res}</div></div>
     <div class="note" style="padding:10px 0 0">Brush 的三維即時畫面在它自己的視窗（<code>--with-viewer</code>）；
@@ -494,8 +604,7 @@ pub fn render_html(
         snapshots = snap.colmap.snapshots,
         final_ply = final_ply,
         colmap_stage = colmap_stage,
-        feature_images = snap.colmap.feature_images,
-        last_feat = snap.colmap.last_feature_count,
+        feature_summary = feature_summary,
         brush_state = brush_state,
         brush_steps = brush_steps,
         brush_res = brush_res,
@@ -656,6 +765,192 @@ arguments:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 日誌尾端讀取：只讀最後 N 位元組、對齊換行邊界，並回報是否截斷。
+    ///
+    /// 為什麼要對齊換行：被切一半的欄位（例如 `frame=12` 被切成 `e=12`）
+    /// 會讓解析器讀到荒謬的值，或讓某一行看起來像另一個階段的輸出。
+    #[test]
+    fn log_tail_reads_the_end_and_reports_truncation() {
+        let dir = std::env::temp_dir().join(format!("macausplat-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("colmap.log");
+        std::fs::write(&path, "old line 1\nold line 2\nRegistering image #5\n").unwrap();
+
+        // 整份讀取（不設上限）
+        let whole = read_log_tail(&path, 0);
+        assert!(!whole.truncated);
+        assert!(whole.text.contains("old line 1"));
+
+        // 只讀尾端：開頭那半行必須被丟掉，但完整的最後一行要留著
+        // （上限 30 位元組 → 視窗從檔案中間開始，最後一行完整落在視窗內）
+        let tail = read_log_tail(&path, 30);
+        assert!(tail.truncated, "讀了尾端就必須標記為截斷");
+        assert!(
+            tail.text.ends_with("Registering image #5\n"),
+            "最後一行必須完整：{:?}",
+            tail.text
+        );
+        assert!(
+            !tail.text.contains("old line 1"),
+            "不該包含視窗外的內容：{:?}",
+            tail.text
+        );
+        assert!(
+            !tail.text.starts_with("line 2"),
+            "被切一半的行必須整行丟棄：{:?}",
+            tail.text
+        );
+
+        // 上限比最後一行還短時：寧可回空字串，也不要吐出半行殘骸
+        let too_small = read_log_tail(&path, 5);
+        assert!(too_small.truncated);
+        assert!(
+            too_small.text.is_empty(),
+            "視窗內只有被截斷的殘骸時應為空：{:?}",
+            too_small.text
+        );
+
+        // 上限大於檔案長度 → 等於整份讀取
+        let big = read_log_tail(&path, 4096);
+        assert!(!big.truncated);
+        assert_eq!(big.text, whole.text);
+
+        // 不存在的檔案：空結果、不 panic
+        let missing = read_log_tail(&dir.join("nope.log"), 64);
+        assert!(missing.text.is_empty() && !missing.truncated);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **關鍵回歸測試**：專案的日誌再大，刷新成本也必須是固定的。
+    ///
+    /// 舊版 `read_snapshot` 用 `fs::read_to_string` 讀整份日誌，而這個函式每兩秒被呼叫一次。
+    /// 這裡造一份遠大於尾端上限的日誌（開頭有特徵抽取階段、結尾是 mapper），
+    /// 驗證：只需要尾端就能得到正確的「最後狀態」，而且累計型的計數會被明確標記為讀不到。
+    #[test]
+    fn huge_logs_are_read_from_the_tail_only() {
+        let dir = std::env::temp_dir().join(format!("macausplat-biglog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        let mut log = String::from(
+            "executable: colmap.exe\narguments:\n  feature_extractor\nFeatures: 1500 (SIFT)\n",
+        );
+        // 讓檔案明顯超過尾端上限（1 MiB）
+        while log.len() < 2 * 1024 * 1024 {
+            log.push_str("Registering image #1 (num_reg_frames=1)\n");
+        }
+        log.push_str(
+            "executable: colmap.exe\narguments:\n  mapper\n\
+             Registering image #42 (num_reg_frames=42)\n=> Image sees 500 / 4321 points\n",
+        );
+        std::fs::write(dir.join("logs/colmap.log"), &log).unwrap();
+
+        let snap = read_snapshot(&dir);
+        assert_eq!(
+            snap.colmap.command.as_deref(),
+            Some("mapper"),
+            "尾端仍要認得目前的子命令：{snap:?}"
+        );
+        assert_eq!(snap.colmap.registered_images, 42);
+        assert_eq!(snap.colmap.points, 4321);
+        assert!(snap.colmap.log_truncated, "讀了尾端就必須標記日誌被截斷");
+        assert_eq!(
+            snap.colmap.feature_images, 0,
+            "前面的特徵階段不在視窗內，計數讀不到"
+        );
+        // 讀不到 ≠ 沒有：畫面必須講清楚，而不是顯示「特徵抽取 0 張」
+        let html = render_html(&snap, "frames", 2, "測試");
+        assert!(
+            html.contains("日誌已截斷"),
+            "截斷時必須明說，而不是顯示 0：{html}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `count_model_images` 只讀前 8 位元組，且要擋掉不合理或截斷的檔案。
+    #[test]
+    fn counts_model_images_from_the_header_only() {
+        let dir = std::env::temp_dir().join(format!("macausplat-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let model = dir.join("work/colmap/sparse/0");
+        std::fs::create_dir_all(&model).unwrap();
+
+        // 檔案很大（8 MB），但只有開頭 8 位元組有意義
+        let mut images = 1234u64.to_le_bytes().to_vec();
+        images.resize(8 * 1024 * 1024, 0);
+        std::fs::write(model.join("images.bin"), &images).unwrap();
+        assert_eq!(count_model_images(&dir), Some(1234));
+
+        // 截斷（不足 8 位元組）→ 讀不到
+        std::fs::write(model.join("images.bin"), b"abc").unwrap();
+        assert_eq!(count_model_images(&dir), None);
+
+        // 不合理的大數（非 COLMAP 檔）→ 讀不到
+        std::fs::write(model.join("images.bin"), u64::MAX.to_le_bytes()).unwrap();
+        assert_eq!(count_model_images(&dir), None);
+
+        // 0 張也不算（避免把空白檔案當成模型）
+        std::fs::write(model.join("images.bin"), 0u64.to_le_bytes()).unwrap();
+        assert_eq!(count_model_images(&dir), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 階段判定：Brush 訓練中／已產出模型但尚未發佈，都必須顯示成 Brush 階段，
+    /// 而不是因為 `command == "mapper"` 就退回顯示「COLMAP 建圖中」。
+    #[test]
+    fn brush_stages_are_reported_while_colmap_is_still_the_last_command() {
+        let dir = std::env::temp_dir().join(format!("macausplat-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        std::fs::write(
+            dir.join("logs/colmap.log"),
+            "arguments:\n  mapper\nRegistering image #5 (num_reg_frames=5)\n",
+        )
+        .unwrap();
+
+        // 還在訓練：有 --total-steps、沒有 elapsed_ms
+        std::fs::write(
+            dir.join("logs/brush.log"),
+            "arguments:\n  --total-steps\n  8000\n",
+        )
+        .unwrap();
+        assert!(
+            read_snapshot(&dir).stage.contains("Brush 訓練中"),
+            "訓練中應顯示 Brush 階段"
+        );
+
+        // 訓練結束（有 elapsed_ms）但還沒有模型：必須說出 Brush 已結束，
+        // 而不是回頭顯示「COLMAP 建圖中」（舊版就是這樣，因為它只看 colmap.command）
+        std::fs::write(
+            dir.join("logs/brush.log"),
+            "arguments:\n  --total-steps\n  8000\nexit_code: Some(0)\nelapsed_ms: 1000\n",
+        )
+        .unwrap();
+        let finished = read_snapshot(&dir);
+        assert!(
+            finished.stage.contains("Brush 已結束"),
+            "Brush 結束後不該退回 COLMAP 階段：{}",
+            finished.stage
+        );
+
+        // 模型已產出（final.ply.tmp 存在）→ 正在發佈
+        std::fs::create_dir_all(dir.join("work/brush")).unwrap();
+        std::fs::write(dir.join("work/brush/final.ply.tmp"), b"ply").unwrap();
+        assert!(
+            read_snapshot(&dir).stage.contains("發佈模型"),
+            "已產出模型時應顯示正在發佈"
+        );
+
+        // 沒有 Brush 日誌時才回到 COLMAP 階段
+        std::fs::remove_file(dir.join("logs/brush.log")).unwrap();
+        std::fs::remove_file(dir.join("work/brush/final.ply.tmp")).unwrap();
+        assert!(
+            read_snapshot(&dir).stage.contains("COLMAP 建圖中"),
+            "沒有 Brush 紀錄時應顯示建圖中"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// HTML 應包含三條進度條與最新影格牆，且重新整理秒數可設定。
     #[test]
     fn renders_expected_html_sections() {
@@ -681,6 +976,7 @@ arguments:
                 points: 2450,
                 best_points: 2450,
                 snapshots: 3,
+                log_truncated: false,
             },
             brush: BrushProgress {
                 total_steps: Some(8000),

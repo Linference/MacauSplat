@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { AnnotationOutcome, SnapshotCloud, SnapshotInfo } from "../types/pipeline";
+import type { AnnotationOutcome, SnapshotCloud } from "../types/pipeline";
 import type { AppRuntimeStatus, ColmapAccelerationStatus, EngineStatus, GaussianCrop, GaussianEditSaveSession, GaussianEditState, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, PipelineEvent, PipelineResult, ProbeAndPlan, ProjectOverview, ProjectSummary, Quality, RuntimeEstimate } from "../types/pipeline";
 import type { TelemetryPreferences } from "../types/telemetry";
 import { getCurrentLocale, translate } from "../i18n";
@@ -137,6 +137,10 @@ export async function exportPly(result: PipelineResult): Promise<string | null> 
 /**
  * 讀取專案最新的 COLMAP 快照點雲（供應用內三維檢視建圖過程）。
  * `maxPoints` 控制送到前端的點數上限。
+ *
+ * 註：後端 `get_snapshot_cloud` 只接受 `projectPath`／`maxPoints`，永遠取最新
+ * 快照或最終模型，沒有「指定某一份快照」的參數；因此這裡不提供快照選擇，
+ * 介面也就不做只會顯示同一份資料的假下拉選單。
  */
 export async function getSnapshotCloud(projectPath: string, maxPoints = 60_000): Promise<SnapshotCloud> {
   if (!inTauri()) {
@@ -146,12 +150,6 @@ export async function getSnapshotCloud(projectPath: string, maxPoints = 60_000):
     };
   }
   return invoke<SnapshotCloud>("get_snapshot_cloud", { projectPath, maxPoints });
-}
-
-/** 列出專案中所有可檢視的快照。 */
-export async function listProjectSnapshots(projectPath: string): Promise<SnapshotInfo[]> {
-  if (!inTauri()) return [];
-  return invoke<SnapshotInfo[]>("list_project_snapshots", { projectPath });
 }
 
 /**

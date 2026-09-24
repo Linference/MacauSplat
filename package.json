@@ -3,10 +3,15 @@
   "private": true,
   "version": "0.4.1",
   "license": "Apache-2.0",
-  "author": "ooolabdev",
+  "author": "Linference",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ooolabdev/ooosplat.git"
+    "url": "git+https://github.com/Linference/MacauSplat.git"
+  },
+  "upstream": {
+    "project": "OOOSplat",
+    "url": "https://github.com/ooolabdev/ooosplat",
+    "license": "Apache-2.0"
   },
   "type": "module",
   "scripts": {
@@ -29,9 +34,16 @@
     "setup:build-deps:macos": "bash scripts/setup-macos-build-deps.sh",
     "build:engines:macos": "bash scripts/build-engines-macos.sh",
     "verify:licenses:macos": "node scripts/verify-licenses.mjs",
+    "bundle:platform:windows": "npm run verify:engines:windows && npm run verify:licenses:windows && npm run build",
+    "bundle:platform:linux": "npm run verify:engines:linux && npm run verify:licenses:linux && npm run build",
+    "bundle:platform:macos": "npm run verify:engines:macos && npm run verify:licenses:macos && npm run build",
     "build:bundle": "npm run stage:cli && npm run verify:engines && npm run verify:licenses && npm run build",
-    "build:bundle:windows": "npm run stage:cli && npm run verify:engines:windows && npm run verify:licenses:windows && npm run build",
-    "package:windows": "npm run verify:telemetry:release && npm run tauri -- build --bundles nsis && node scripts/collect-windows-installer.mjs",
+    "build:bundle:windows": "npm run bundle:platform:windows",
+    "build:bundle:linux": "npm run bundle:platform:linux",
+    "build:bundle:macos": "npm run bundle:platform:macos",
+    "package:windows": "npm run verify:telemetry:release && npm run stage:cli && npm run tauri -- build --bundles nsis && node scripts/collect-windows-installer.mjs",
+    "package:linux": "npm run verify:telemetry:release && npm run stage:cli && npm run tauri -- build --bundles deb",
+    "package:macos": "npm run verify:telemetry:release && npm run stage:cli && npm run tauri -- build --bundles app,dmg",
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri",

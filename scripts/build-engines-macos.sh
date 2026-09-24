@@ -15,7 +15,7 @@ manifest="$workspace/engines/manifest.macos.json"
 cache="$workspace/.cache/macos-engine-build"
 sources="$cache/sources"
 build="$cache/build"
-stage="$cache/stage/ooosplat-engines-macos-arm64"
+stage="$cache/stage/macausplat-engines-macos-arm64"
 output="$workspace/dist-engines"
 jobs="${OOOSPLAT_BUILD_JOBS:-$(sysctl -n hw.logicalcpu)}"
 deployment_target="15.0"
@@ -264,9 +264,10 @@ fs.writeFileSync(path.join(process.argv[2],"BUILD-INFO.json"),JSON.stringify(out
 )
 
 archive_name="$(read_manifest distribution.archiveName)"
+layout_root="$(read_manifest distribution.archiveLayoutRoot)"
 archive="$output/$archive_name"
 rm -f -- "$archive" "$archive.sha256"
-tar -cJf "$archive" -C "$cache/stage" ooosplat-engines-macos-arm64
+tar -cJf "$archive" -C "$cache/stage" "$layout_root"
 (
   cd "$output"
   shasum -a 256 "$archive_name" > "$archive_name.sha256"

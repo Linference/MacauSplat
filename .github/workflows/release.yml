@@ -1,0 +1,227 @@
+name: Publish installers
+
+# Why this workflow exists: before it, installers and their SHA256SUMS.txt only
+# lived for 14 days as workflow artifacts, so there was nothing stable to
+# download or verify against.
+#
+# Artifact sourcing: each `actions/download-artifact@v7` step without `run-id`
+# pulls the artifacts of THIS workflow run, and the platform workflows upload
+# from the same commit. So the release has to be triggered after the platform
+# runs for that commit have finished -- typically by pushing the `v*` tag once
+# they are green. Artifacts expire after 14 days (retention-days: 14 in
+# windows.yml / ubuntu.yml / macos.yml), so a release triggered much later than
+# that cannot collect them. Manual dispatch therefore needs the platform runs to
+# still be recent.
+#
+# Only job `publish` needs `contents: write`; `collect` just downloads artifacts.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish, for example v0.4.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # `continue-on-error` is not used anywhere here: a step that must exist
+      # gets an `if:` guard instead. The three platform artifacts are produced
+      # by different workflows/triggers, so any of them may legitimately be
+      # absent; whatever IS present is collected.
+      - name: Download Windows installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-x64-windows
+          merge-multiple: true
+          path: dist/installers
+
+      - name: Download Linux installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-x64-linux
+          merge-multiple: true
+          path: dist/installers
+
+      - name: Download macOS installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-arm64-macos
+          merge-multiple: true
+          path: dist/installers
+
+      # Only the per-platform SHA256SUMS.txt files are downloaded: `pattern:
+      # installers-*` cannot re-download the platform installers because their
+      # artifact names all start with `MacauSplat-`, which keeps this step cheap
+      # (the Windows installer alone is ~500 MB).
+      - name: Download per-platform checksum artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*
+          path: dist/checksums
+
+      - name: Combine SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          # `find` on a non-existent path fails, and with `pipefail` a failure
+          # anywhere in the pipeline aborts the step, so a run with no checksum
+          # artifact downloaded must be tolerated explicitly.
+          if [ ! -d dist/checksums ]; then
+            echo "::warning::No per-platform checksum artifact was downloaded."
+          fi
+          mkdir -p dist/combined dist/checksums
+          : > dist/combined/SHA256SUMS.txt
+          find dist/checksums -type f -name SHA256SUMS.txt -print0 |
+            sort -z |
+            xargs -0 -r cat >> dist/combined/SHA256SUMS.txt
+          echo "Combined SHA256SUMS.txt:"
+          cat dist/combined/SHA256SUMS.txt
+          if [ ! -s dist/combined/SHA256SUMS.txt ]; then
+            echo "::warning::No per-platform SHA256SUMS.txt was found among the current run's artifacts; the release notes will not contain inline checksums."
+          fi
+
+      - name: Verify installers are present
+        run: |
+          set -euo pipefail
+          count="$(find dist/installers -maxdepth 1 -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.dmg' -o -name '*.zip' \) | wc -l)"
+          test "$count" -gt 0
+          echo "Collected $count installer(s)."
+
+      - name: Upload combined checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installers-checksums
+          path: dist/combined/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: collect
+    # On a `v*` tag push github.ref is refs/tags/v...; on a manual dispatch it is
+    # a branch, so the operator must supply the tag through `inputs.tag`.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Needed so `gh release create` runs in a repository context on a manual
+      # dispatch (a tag push would give that context anyway).
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download Windows installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-x64-windows
+          merge-multiple: true
+          path: dist/installers
+
+      - name: Download Linux installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-x64-linux
+          merge-multiple: true
+          path: dist/installers
+
+      - name: Download macOS installer artifact
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: MacauSplat-*-arm64-macos
+          merge-multiple: true
+          path: dist/installers
+
+      - name: Download combined checksums
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: installers-checksums
+          path: dist
+
+      - name: Publish release with installers and checksums
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          test -n "$tag"
+          echo "Publishing tag: $tag"
+
+          # Collect every installer and the combined checksum file. Fails with a
+          # clear message if nothing was collected, instead of creating an empty
+          # release.
+          have_checksums=0
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find dist/installers -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.deb' -o -name '*.dmg' -o -name '*.zip' \) -print0 2>/dev/null)
+          if [ -f dist/SHA256SUMS.txt ] && [ -s dist/SHA256SUMS.txt ]; then
+            files+=("dist/SHA256SUMS.txt")
+            have_checksums=1
+          else
+            echo "::warning::Publishing without a combined SHA256SUMS.txt asset."
+          fi
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No installer artifact was found for this run, so no release can be published. Run the platform workflows for the commit being released first (their artifacts expire after 14 days)."
+            exit 1
+          fi
+          printf '%s\n' "${files[@]}"
+
+          # The checksums are published inline (not only as an asset) because
+          # scripts/join-installer-parts.ps1 instructs users to compare against
+          # "the SHA256 published on the release page".
+          {
+            if [ "$have_checksums" -eq 1 ]; then
+              printf '## SHA256SUMS.txt\n\n```\n'
+              cat dist/SHA256SUMS.txt
+              printf '```\n\n'
+            else
+              printf 'No combined checksum file was available for this release.\n\n'
+            fi
+            printf '%s\n' \
+              '## Installers' \
+              '' \
+              '- Windows: `MacauSplat-<version>-x64-windows.exe` (NSIS installer)' \
+              '- Linux: `MacauSplat-<version>-x64-linux.deb`' \
+              '- macOS: `MacauSplat-<version>-arm64-macos.dmg` and `MacauSplat-<version>-arm64-macos.app.zip`' \
+              '' \
+              '## Verify' \
+              '' \
+              'Compare the SHA-256 values above with the files you downloaded. `SHA256SUMS.txt` is attached to this release as well.' \
+              '' \
+              '## Third-party engines' \
+              '' \
+              'The bundled FFmpeg build is LGPL-2.1-or-later. The corresponding-source offer ships with the app distribution as `licenses/FFmpeg-CORRESPONDING-SOURCE.txt`.'
+          } > dist/release-notes.md
+          echo "Release notes:"
+          cat dist/release-notes.md
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" --clobber "${files[@]}"
+            gh release edit "$tag" --notes-file dist/release-notes.md
+          else
+            gh release create "$tag" --title "MacauSplat $tag" --notes-file dist/release-notes.md "${files[@]}"
+          fi

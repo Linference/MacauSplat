@@ -1,5 +1,24 @@
 name: macOS 15+ arm64 engine runtime
 
+# Trigger choice (deliberate, do not "simplify"):
+#
+# GitHub evaluates every filter under one `on.push:` as a conjunction, and a
+# single event cannot be split across two `push:` blocks. So a `push:` that
+# carries BOTH `tags:` and `paths:` requires the pushed tag's commit to also
+# touch one of the listed paths. A release tag that only bumps versions or
+# docs would therefore be SILENTLY SKIPPED, which must never happen for the
+# engine publish flow.
+#
+# The safest option that cannot break tag publishing is used here:
+#   * `push.tags` alone -- every `engines-macos-arm64-v*` tag publishes.
+#     No `paths:` filter is attached to this push trigger.
+#   * `workflow_dispatch` -- the path-triggered rebuild is reached manually.
+#     When `engines/manifest.macos.json`, `scripts/build-engines-macos.sh`,
+#     `scripts/setup-macos-build-deps.sh`, `scripts/setup-engines-macos.sh`,
+#     `scripts/verify-engines-macos.sh` or this file changes on `main`, run
+#     this workflow from the Actions tab (or `gh workflow run macos-engines.yml`).
+#     No extra workflow file is introduced for that, and a tag release can
+#     never be skipped.
 on:
   workflow_dispatch:
   push:
@@ -19,23 +38,34 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
 
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # License texts and the dependency inventory are packaged INTO the engine
+      # archive, so they are build inputs and must be verified before the build.
+      - name: Verify license metadata and mappings
+        run: npm run verify:licenses
+
+      # actions/cache@v5 deprecated `save-always` (and it never ran when an
+      # earlier step failed). Restore here, save explicitly after the engine
+      # build with `if: always()`.
       - name: Restore macOS build caches
-        uses: actions/cache@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/Library/Caches/Homebrew
             .cache/ccache
             .cache/macos-engine-build/sources
           key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}
-          save-always: true
+          restore-keys: macos-15-arm64-engines-
 
       - name: Install pinned build prerequisites
         run: bash scripts/setup-macos-build-deps.sh
@@ -44,9 +74,9 @@ jobs:
         run: npm run build:engines:macos
 
       - name: Upload engine archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ooosplat-engines-macos-arm64
+          name: macausplat-engines-macos-arm64
           path: |
             dist-engines/*.tar.xz
             dist-engines/*.sha256
@@ -61,5 +91,17 @@ jobs:
           test "${GITHUB_REF_NAME}" = "$(node -e 'console.log(require("./engines/manifest.macos.json").distribution.tag)')"
           gh release create "$GITHUB_REF_NAME" \
             dist-engines/*.tar.xz dist-engines/*.sha256 \
-            --title "OOOSplat macOS arm64 engines ${GITHUB_REF_NAME}" \
-            --notes "Pinned Apple Silicon runtime for OOOSplat. Contains LGPL shared FFmpeg/FFprobe, CPU CLI-only COLMAP, Brush, build metadata, dependency inventory, and SHA-256 checksums."
+            --title "MacauSplat macOS arm64 engines ${GITHUB_REF_NAME}" \
+            --notes "Pinned Apple Silicon runtime for MacauSplat. Contains LGPL shared FFmpeg/FFprobe, CPU CLI-only COLMAP, Brush, build metadata, dependency inventory, and SHA-256 checksums. The matching corresponding source for the LGPL FFmpeg build, as required by LGPL-2.1, is offered with the app distribution as licenses/FFmpeg-CORRESPONDING-SOURCE.txt."
+
+      # Must come after the expensive steps; `if: always()` so a cache is still
+      # written when a later step failed.
+      - name: Save macOS build caches
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            .cache/ccache
+            .cache/macos-engine-build/sources
+          key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}

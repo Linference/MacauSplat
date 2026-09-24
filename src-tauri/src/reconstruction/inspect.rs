@@ -7,35 +7,91 @@
 //!     - 影格檔名與 COLMAP 記錄是否對得上 → 對不上就找不到對應的影像
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
 use super::colmap::{normalize_name, SparseReconstruction};
+
+/// 影格目錄的候選位置（依優先順序）。
+///
+/// 為什麼要集中成一個常數：這個清單原本散在 `audit_project`、`monitor` 與 QA 表的呼叫端，
+/// 而 QA 表更直接寫死 `../work/frames`——於是「影格其實放在 `source/images`」的專案
+/// 會產生一整頁破圖，卻沒有任何錯誤訊息。現在只有一處定義，其他人只能引用它。
+pub const FRAME_DIRECTORY_CANDIDATES: [&str; 3] = ["work/frames", "frames", "source/images"];
+
+/// QA 表在找不到影格目錄時的後備連結（維持舊行為，但由呼叫端明確選用）。
+pub const FALLBACK_FRAMES_HREF: &str = FRAME_DIRECTORY_CANDIDATES[0];
+
+/// 實際存在的影格目錄（相對於專案根目錄）。
+pub fn frames_directory(project_dir: impl AsRef<Path>) -> Option<PathBuf> {
+    let project_dir = project_dir.as_ref();
+    FRAME_DIRECTORY_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| project_dir.join(candidate).is_dir())
+}
+
+/// 由 QA 表（位於 `html_dir`）指向實際影格目錄的相對連結。
+///
+/// 回傳 `None` 表示三個候選位置都不存在；呼叫端此時應使用 `FALLBACK_FRAMES_HREF`
+/// 並讓使用者知道連結可能失效，而不是讓整份標註失敗。
+/// 分隔符一律用 `/`：這是 HTML 屬性的慣例，Windows 的反斜線在瀏覽器裡會被當成一般字元。
+pub fn frames_href(project_dir: impl AsRef<Path>, html_dir: impl AsRef<Path>) -> Option<String> {
+    let project_dir = project_dir.as_ref();
+    let frames = frames_directory(project_dir)?;
+    let target = project_dir.join(&frames);
+    let relative = relative_path(html_dir.as_ref(), &target)?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// 由 `from_dir` 走到 `to_dir` 的相對路徑。
+///
+/// 兩邊都必須相對於同一個基準（相對路徑會先接上目前工作目錄）；
+/// 不同磁碟機（Windows）或無法比較時回 `None`。
+fn relative_path(from_dir: &Path, to_dir: &Path) -> Option<PathBuf> {
+    let from = absolute(from_dir);
+    let to = absolute(to_dir);
+    let from_parts: Vec<Component> = from.components().collect();
+    let to_parts: Vec<Component> = to.components().collect();
+    // Windows 的 `C:` 與 UNC 前綴必須完全相同才能比較
+    if from_parts.first() != to_parts.first() {
+        return None;
+    }
+    let common = from_parts
+        .iter()
+        .zip(to_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in common..from_parts.len() {
+        out.push("..");
+    }
+    for part in &to_parts[common..] {
+        out.push(part.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Some(out)
+}
+
+/// 把相對路徑接上目前工作目錄（已在絕對路徑時原樣回傳）。
+fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
 
 /// 三維包圍盒（軸對齊），用於快速描述點雲範圍。
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Bounds3 {
     pub min: [f64; 3],
     pub max: [f64; 3],
-}
-
-impl Bounds3 {
-    pub fn size(&self) -> [f64; 3] {
-        [
-            self.max[0] - self.min[0],
-            self.max[1] - self.min[1],
-            self.max[2] - self.min[2],
-        ]
-    }
-
-    pub fn center(&self) -> [f64; 3] {
-        [
-            (self.min[0] + self.max[0]) / 2.0,
-            (self.min[1] + self.max[1]) / 2.0,
-            (self.min[2] + self.max[2]) / 2.0,
-        ]
-    }
 }
 
 /// 單一相機的使用統計。
@@ -55,8 +111,13 @@ pub struct ProjectAudit {
     pub project_dir: PathBuf,
     pub project_name: Option<String>,
     pub quality: Option<String>,
-    /// `work/frames/` 內的影格檔案數。
+    /// 影格目錄（見 `frames_dir`）內的影格檔案數。
     pub frames_on_disk: usize,
+    /// 實際採用的影格目錄（相對於專案根目錄）；`None` 表示三個候選位置都不存在。
+    ///
+    /// 為什麼要回報：後續的 QA 表必須連到「真正的那個目錄」，
+    /// 而使用者也需要知道這份審計是從哪裡數影格的。
+    pub frames_dir: Option<String>,
     /// COLMAP 已註冊（有相機位姿）的影格數。
     pub registered_frames: usize,
     /// 註冊率 = 已註冊 / 影格數。
@@ -96,14 +157,11 @@ pub fn audit_project(
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
-    // 影格：優先 work/frames，其次 source/images
-    let frames_dir = ["work/frames", "frames", "source/images"]
-        .iter()
-        .map(|p| project_dir.join(p))
-        .find(|p| p.is_dir());
+    // 影格：依候選清單找第一個存在的目錄（清單定義在模組常數，避免各處各寫一份）
+    let frames_dir = frames_directory(&project_dir);
     let mut frame_names: Vec<String> = Vec::new();
-    if let Some(dir) = &frames_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+    if let Some(relative) = &frames_dir {
+        if let Ok(entries) = std::fs::read_dir(project_dir.join(relative)) {
             for e in entries.flatten() {
                 if e.path().is_file() {
                     frame_names.push(e.file_name().to_string_lossy().to_string());
@@ -111,7 +169,10 @@ pub fn audit_project(
             }
         }
     } else {
-        blockers.push("找不到 work/frames 目錄".into());
+        blockers.push(format!(
+            "找不到影格目錄（候選：{}）",
+            FRAME_DIRECTORY_CANDIDATES.join("、")
+        ));
     }
 
     // 稀疏重建
@@ -231,6 +292,7 @@ pub fn audit_project(
             .map(str::to_string),
         quality: project_value.as_ref().and_then(classify_quality),
         frames_on_disk: frame_names.len(),
+        frames_dir: frames_dir.map(|p| p.to_string_lossy().replace('\\', "/")),
         registered_frames: reconstruction.images.len(),
         registration_ratio,
         missing_files: missing_files.into_iter().take(20).collect(),
@@ -353,6 +415,98 @@ mod tests {
         assert!(a.blockers.is_empty(), "不應有 blocker：{:?}", a.blockers);
         assert_eq!(a.project_name.as_deref(), Some("demo"));
         assert_eq!(a.quality.as_deref(), Some("balanced"));
+        // 審計要說出影格是從哪個目錄數來的（後續 QA 表要用同一個）
+        assert_eq!(a.frames_dir.as_deref(), Some("work/frames"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// 影格目錄的三個候選位置：找到第一個存在的，並能算出 QA 表用的相對連結。
+    ///
+    /// 這是 QA 表破圖的根因：舊版寫死 `../work/frames`，
+    /// 但專案的影格也可能在 `frames/` 或 `source/images/`。
+    #[test]
+    fn locates_the_actual_frames_directory_and_builds_a_relative_link() {
+        let root = std::env::temp_dir().join(format!("macausplat-frames-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // 三個都沒有 → 沒有可用的影格目錄
+        assert_eq!(frames_directory(&root), None);
+        assert_eq!(frames_href(&root, root.join("annotation")), None);
+        assert_eq!(FALLBACK_FRAMES_HREF, "work/frames");
+
+        // 只有 source/images → 必須選它，而不是 work/frames
+        fs::create_dir_all(root.join("source/images")).unwrap();
+        assert_eq!(
+            frames_directory(&root).as_deref(),
+            Some(Path::new("source/images"))
+        );
+        assert_eq!(
+            frames_href(&root, root.join("annotation")).as_deref(),
+            Some("../source/images")
+        );
+
+        // 加上 frames/ → 優先序較高的 frames 勝出
+        fs::create_dir_all(root.join("frames")).unwrap();
+        assert_eq!(
+            frames_directory(&root).as_deref(),
+            Some(Path::new("frames"))
+        );
+
+        // 最後加上 work/frames → 最高優先
+        fs::create_dir_all(root.join("work/frames")).unwrap();
+        assert_eq!(
+            frames_directory(&root).as_deref(),
+            Some(Path::new("work/frames"))
+        );
+        assert_eq!(
+            frames_href(&root, root.join("annotation")).as_deref(),
+            Some("../work/frames")
+        );
+        // QA 表放在專案根目錄時，連結就是相對的子目錄
+        assert_eq!(
+            frames_href(&root, &root).as_deref(),
+            Some("work/frames"),
+            "同一層時不該出現多餘的 .."
+        );
+        // 相對路徑會以目前工作目錄為基準（命令列的 `--out` 常常是相對路徑）
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            relative_path(Path::new("."), &cwd.join("work/frames")).as_deref(),
+            Some(Path::new("work/frames"))
+        );
+        assert_eq!(
+            relative_path(&cwd.join("annotation"), Path::new("work/frames")).as_deref(),
+            Some(Path::new("../work/frames"))
+        );
+        // 不同磁碟機（Windows）無法表示成相對路徑 → 回 None 讓呼叫端改用後備值
+        #[cfg(windows)]
+        assert_eq!(
+            relative_path(Path::new("C:/a"), Path::new("D:/b")),
+            None,
+            "跨磁碟機不該硬湊出相對路徑"
+        );
+        // 連結一律用 `/`（HTML 屬性裡的反斜線不是分隔符）
+        assert!(!frames_href(&root, root.join("annotation"))
+            .unwrap()
+            .contains('\\'));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 審計會指出影格目錄不存在，而不是安靜地回報 0 張。
+    #[test]
+    fn audit_reports_missing_frames_directory() {
+        let dir = make_project("noframes", 24, 24, true, false);
+        fs::remove_dir_all(dir.join("work/frames")).unwrap();
+        let a = audit_project(&dir).expect("審計應成功");
+        assert_eq!(a.frames_on_disk, 0);
+        assert!(a.frames_dir.is_none());
+        assert!(
+            a.blockers.iter().any(|b| b.contains("找不到影格目錄")),
+            "應指出找不到影格目錄：{:?}",
+            a.blockers
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

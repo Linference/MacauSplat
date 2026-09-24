@@ -29,11 +29,15 @@
   },
   "distribution": {
     "tag": "engines-macos-arm64-v0.2.0",
-    "archiveName": "ooosplat-engines-macos-arm64-v0.2.0.tar.xz",
-    "sourceUrl": "https://github.com/ooolabdev/ooosplat/releases/download/engines-macos-arm64-v0.2.0/ooosplat-engines-macos-arm64-v0.2.0.tar.xz",
-    "archiveSha256File": "https://github.com/ooolabdev/ooosplat/releases/download/engines-macos-arm64-v0.2.0/ooosplat-engines-macos-arm64-v0.2.0.tar.xz.sha256",
+    "archiveName": "macausplat-engines-macos-arm64-v0.2.0.tar.xz",
+    "publishedBy": "Linference (released by .github/workflows/macos-engines.yml from this repository)",
+    "sourceUrl": "https://github.com/Linference/MacauSplat/releases/download/engines-macos-arm64-v0.2.0/macausplat-engines-macos-arm64-v0.2.0.tar.xz",
+    "archiveSha256File": "https://github.com/Linference/MacauSplat/releases/download/engines-macos-arm64-v0.2.0/macausplat-engines-macos-arm64-v0.2.0.tar.xz.sha256",
+    "buildFallback": "scripts/build-engines-macos.sh",
+    "archiveLayoutRoot": "macausplat-engines-macos-arm64",
     "destination": "engines/macos/arm64",
-    "integrityFile": "SHA256SUMS"
+    "integrityFile": "SHA256SUMS",
+    "note": "The archive is built from the pinned engine sources below by scripts/build-engines-macos.sh and published by this project. It is NOT downloaded from the upstream OOOSplat release page: upstream publishes no engines-macos-arm64-v* tag, so a previous manifest pointed at a 404 and the macOS CI job failed at download time. scripts/setup-engines-macos.sh downloads this asset, verifies the published SHA-256, and falls back to buildFallback when the asset is not published yet."
   },
   "engines": [
     {

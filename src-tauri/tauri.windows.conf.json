@@ -5,6 +5,7 @@
       "nsis"
     ],
     "resources": {
+      "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt": "licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
       "../engines/manifest.json": "engines/manifest.json",
       "../engines/ffmpeg/": "engines/ffmpeg/",
       "../engines/colmap/": "engines/colmap/",

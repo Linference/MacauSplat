@@ -378,16 +378,20 @@ const zhCN = {
     "pointcloud.distance": "视距",
     "pointcloud.open": "查看点云",
 
-    "annotation.run": "產生標註",
-    "annotation.running": "正在擬合包圍盒並投影…",
-    "annotation.title": "自動標註結果",
-    "annotation.summary": "採用 {accepted} / {total} 張（{ratio}）｜包圍盒 {size}",
-    "annotation.labels": "已寫出 {count} 個 YOLO 標籤",
-    "annotation.upEstimated": "上軸為推定值（相機軌跡退化，高度可能不準）",
-    "annotation.openFolder": "開啟標註資料夾",
-    "annotation.qaHint": "雙擊資料夾內的 qa.html 可人工複核框是否正確",
-    "annotation.failed": "自動標註失敗：{detail}",
     "pointcloud.openLive": "查看建图点云（实时）",
+    "pointcloud.canvasAria": "建图点云视图：方向键旋转、加号与减号缩放、Home 重置视角",
+    "pointcloud.reconnecting": "暂时读不到快照，正在重试…",
+    "pointcloud.invalidShape": "快照数据不完整，已保留上一份可用的点云",
+
+    "annotation.run": "生成标注",
+    "annotation.running": "正在拟合包围盒并投影…",
+    "annotation.title": "自动标注结果",
+    "annotation.summary": "采用 {accepted} / {total} 张（{ratio}）｜包围盒 {size}",
+    "annotation.labels": "已写出 {count} 个 YOLO 标签",
+    "annotation.upEstimated": "上轴为推定值（相机轨迹退化，高度可能不准）",
+    "annotation.openFolder": "打开标注文件夹",
+    "annotation.qaHint": "双击文件夹内的 qa.html 可人工复核框是否正确",
+    "annotation.failed": "自动标注失败：{detail}",
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
@@ -465,6 +469,9 @@ const en: Record<TranslationKey, string> = {
     "annotation.qaHint": "Double-click qa.html inside the folder to review the boxes",
     "annotation.failed": "Auto-annotation failed: {detail}",
     "pointcloud.openLive": "Watch point cloud (live)",
+    "pointcloud.canvasAria": "Reconstruction point cloud view: arrow keys rotate, plus and minus zoom, Home resets the view",
+    "pointcloud.reconnecting": "Snapshot temporarily unavailable, retrying…",
+    "pointcloud.invalidShape": "The snapshot data is incomplete; the last usable point cloud is still shown",
 
 };
 

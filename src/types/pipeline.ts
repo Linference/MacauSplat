@@ -188,13 +188,6 @@ export interface SnapshotCloud {
   is_final: boolean;
 }
 
-/** 可檢視的快照項目。 */
-export interface SnapshotInfo {
-  name: string;
-  path: string;
-  is_final: boolean;
-}
-
 /** 自動標註的結果摘要（由 Rust 端 commands::annotate_project 產生）。 */
 export interface AnnotationOutcome {
   outputDir: string;

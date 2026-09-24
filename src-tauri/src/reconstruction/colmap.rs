@@ -7,7 +7,19 @@
 //!
 //! 本模組只做兩件事，且都與既有引擎無關（純讀檔＋數學）：
 //!     1. 解析 COLMAP 的二進位輸出（`cameras.bin` / `images.bin` / `points3D.bin`）
-//!     2. 世界座標 → 相機座標 → 像素座標的投影（含針孔與徑向畸變相機模型）
+//!     2. 世界座標 → 相機座標 → 像素座標的投影（**針孔＋徑向／切向畸變**）
+//!
+//! ## 投影精度的界線（重要）
+//! `camera_to_pixel` 實作的是針孔模型加上 Brown 型徑向／切向畸變。
+//! COLMAP 的其他模型（魚眼、FOV、FullOpenCV 的高階項）**沒有**實作，
+//! 對那些相機只能給出近似值。這件事由 `CameraModel::projection_is_approximate`
+//! 明確表達，並由自動標註在影格上附帶警示——不能默默給出偏掉的框。
+//!
+//! ## 讀檔的兩個原則
+//!   - **不解析不需要的欄位**：`images.bin` 每張影像的 `points2D`（每筆 24 位元組）在本專案沒有用途，
+//!     因此只跳過（`Reader::skip`）而不進記憶體；但格式正確性仍要檢查（跳過時讀到檔尾即報錯）。
+//!   - **容量一律先檢查**：檔案裡聲稱的數量是 u64，`Vec::with_capacity(u64::MAX as usize)` 會直接
+//!     abort（無法用 `Result` 接住）。因此一律用 `checked_capacity` 以檔案長度反推上界。
 //!
 //! 座標約定（與 COLMAP 一致）：
 //!     `X_cam = R * X_world + t`，其中 `R` 由四元數 `qvec = (w, x, y, z)` 轉換而來，
@@ -34,7 +46,12 @@ pub enum CameraModel {
     Radial,
     /// id 4：`fx, fy, cx, cy, k1, k2, p1, p2`
     OpenCv,
-    /// id 5：`fx, fy, cx, cy, k1, k2, k3, k4`（魚眼，本模組僅近似處理）
+    /// id 5：`fx, fy, cx, cy, k1, k2, k3, k4`
+    ///
+    /// 這是**魚眼**模型：COLMAP 對它的 k1~k4 是魚眼（等距）畸變多項式的係數，
+    /// 與 Brown 徑向畸變不是同一回事。本模組的 `camera_to_pixel` 只會把它當成
+    /// 「針孔＋徑向」處理，因此對這個模型算出的像素座標只是近似
+    /// （見 `CameraModel::projection_is_approximate`）。
     OpenCvFisheye,
     /// id 6：`fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6`
     FullOpenCv,
@@ -84,7 +101,7 @@ impl CameraModel {
         }
     }
 
-    /// 是否為魚眼類模型（畸變較大，本模組僅做最小處理）。
+    /// 是否為魚眼類模型（畸變多項式為魚眼／等距形式，而非 Brown 徑向畸變）。
     pub fn is_fisheye(self) -> bool {
         matches!(
             self,
@@ -93,6 +110,18 @@ impl CameraModel {
                 | Self::RadialFisheye
                 | Self::ThinPrismFisheye
         )
+    }
+
+    /// 本模組的投影（針孔＋徑向／切向畸變）是否只能**近似**這個模型。
+    ///
+    /// 為什麼要與 `is_fisheye` 分開：兩者重疊但不相等。
+    ///   - `Fov` 不是魚眼，但它有一個本模組未實作的 ω 畸變；
+    ///   - `FullOpenCv` 也不是魚眼，而 `radial_distortion` 只取 k1、k2，k3~k6 被忽略；
+    ///   - `ThinPrismFisheye` 的薄稜鏡項同樣未實作。
+    ///
+    /// 自動標註會用這個方法決定「這張影格的框要不要附帶近似警示」。
+    pub fn projection_is_approximate(self) -> bool {
+        self.is_fisheye() || matches!(self, Self::Fov | Self::FullOpenCv)
     }
 }
 
@@ -142,7 +171,7 @@ impl Camera {
     }
 }
 
-/// 一張已註冊影格的姿態與二維特徵點。
+/// 一張已註冊影格的姿態。
 #[derive(Debug, Clone)]
 pub struct Image {
     pub id: u32,
@@ -152,8 +181,6 @@ pub struct Image {
     pub camera_id: u32,
     /// 相對於 `work/frames/` 的檔名（COLMAP 記錄的是它自己的相對路徑）。
     pub name: String,
-    /// 每筆為 `(x, y, point3D_id)`；`point3D_id == -1` 表示沒有對應三維點。
-    pub points2d: Vec<(f64, f64, i64)>,
 }
 
 impl Image {
@@ -187,12 +214,14 @@ impl Image {
 }
 
 /// 稀疏點雲中的一個三維點。
+///
+/// 只保留本專案真的會用到的欄位：位置、顏色、可觀測列表（track）。
+/// `error`（重投影誤差）在檔案裡仍然存在，但沒有任何地方讀取它，因此解析時直接跳過。
 #[derive(Debug, Clone)]
 pub struct Point3D {
     pub id: i64,
     pub xyz: [f64; 3],
     pub rgb: [u8; 3],
-    pub error: f64,
     /// `(image_id, point2D_idx)` 的可觀測列表，長度即 track length。
     pub track: Vec<(u32, u32)>,
 }
@@ -244,19 +273,6 @@ impl SparseReconstruction {
             points,
         })
     }
-
-    /// 名稱 → 影格的查表（用來把 `frames/` 的檔案對到姿態）。
-    pub fn images_by_name(&self) -> HashMap<String, &Image> {
-        self.images
-            .iter()
-            .map(|i| (normalize_name(&i.name), i))
-            .collect()
-    }
-
-    /// 是否具備可用的點雲（供自動擬合包圍盒）。
-    pub fn has_points(&self) -> bool {
-        !self.points.is_empty()
-    }
 }
 
 /// 把 COLMAP 記錄的檔名正規化，方便與影格檔名比對。
@@ -282,16 +298,66 @@ pub enum ColmapError {
 }
 
 // ---------------------------------------------------------------- 二進位讀取小工具
+
+/// `images.bin` 中每一筆 `points2D` 的位元組數：`x: f64`、`y: f64`、`point3D_id: i64`。
+const POINT2D_BYTES: u64 = 24;
+/// `points3D.bin` 中每一筆 track entry 的位元組數：`image_id: u32`、`point2D_idx: u32`。
+const TRACK_ENTRY_BYTES: u64 = 8;
+/// 單一相機在 `cameras.bin` 中最少佔用的位元組數（`id+model+width+height` 加上最少 3 個參數）。
+const MIN_CAMERA_BYTES: u64 = 4 + 4 + 8 + 8 + 3 * 8;
+/// 單一影像在 `images.bin` 中最少佔用的位元組數（空檔名、零個特徵點）。
+const MIN_IMAGE_BYTES: u64 = 4 + 4 * 8 + 3 * 8 + 4 + 1 + 8;
+/// 單一三維點在 `points3D.bin` 中最少佔用的位元組數（零長度 track）。
+const MIN_POINT_BYTES: u64 = 8 + 3 * 8 + 3 + 8 + 8;
+
+/// 檢查檔頭聲稱的元素數量是否可能，並回傳可安全保留的容量。
+///
+/// 為什麼不能直接 `num as usize`：`num` 是檔案裡的 u64。檔案若損壞、或根本不是 COLMAP 的輸出，
+/// 這個值可能是 `u64::MAX`；`Vec::with_capacity(u64::MAX as usize)` **配置失敗會直接 abort**，
+/// 那是行程層級的死亡，`Result` 完全接不住（應用會直接消失，而不是顯示錯誤）。
+///
+/// 這裡用「檔案長度 ÷ 單一元素最少位元組」當上界：合法的檔案必定滿足這個不等式，
+/// 因此不會誤擋正常檔案；超過上界就只可能是壞檔案，回 `ColmapError::Format`。
+fn checked_capacity(
+    reader: &Reader,
+    num: u64,
+    min_element_bytes: u64,
+    what: &str,
+) -> Result<usize, ColmapError> {
+    /// 絕對上限：即使檔案真的很大，也不為超過此數量的元素預先配置記憶體
+    /// （一億個元素已遠超任何合理的單一重建規模）。
+    const MAX_ELEMENTS: u64 = 100_000_000;
+    let bound = (reader.len / min_element_bytes.max(1)).min(MAX_ELEMENTS);
+    if num > bound {
+        return Err(ColmapError::Format {
+            file: reader.path.display().to_string(),
+            detail: format!(
+                "{what}數量 {num} 與檔案長度 {} 不符（上限 {bound}），檔案可能損壞或不是 COLMAP 輸出",
+                reader.len
+            ),
+        });
+    }
+    usize::try_from(num).map_err(|_| ColmapError::Format {
+        file: reader.path.display().to_string(),
+        detail: format!("{what}數量 {num} 超出本平台可表示的範圍"),
+    })
+}
+
 struct Reader {
     inner: BufReader<File>,
     path: PathBuf,
+    /// 開啟時的檔案長度（只用來檢查數量是否合理，`checked_capacity` 會用到）。
+    len: u64,
 }
 
 impl Reader {
     fn open(path: &Path) -> Result<Self, ColmapError> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
         Ok(Self {
-            inner: BufReader::new(File::open(path)?),
+            inner: BufReader::new(file),
             path: path.to_path_buf(),
+            len,
         })
     }
 
@@ -304,6 +370,27 @@ impl Reader {
                 detail: format!("讀取 {N} 位元組失敗（檔案可能被截斷）：{e}"),
             })?;
         Ok(buf)
+    }
+
+    /// 跳過 `count` 個位元組。
+    ///
+    /// 為什麼不是 `seek`：`BufReader` 上的 seek 會丟掉整個緩衝區，之後每次讀取都要重新呼叫系統呼叫；
+    /// 這裡改成「讀進固定大小的緩衝區再丟掉」——不配置與 `count` 等量的記憶體，
+    /// 但**仍然讀到那些位元組**，因此檔案被截斷時會回 `Format` 錯誤，格式正確性不受影響。
+    fn skip(&mut self, count: u64) -> Result<(), ColmapError> {
+        let mut buffer = [0u8; 8192];
+        let mut remaining = count;
+        while remaining > 0 {
+            let chunk = remaining.min(buffer.len() as u64) as usize;
+            self.inner
+                .read_exact(&mut buffer[..chunk])
+                .map_err(|e| ColmapError::Format {
+                    file: self.path.display().to_string(),
+                    detail: format!("跳過 {count} 位元組時失敗（檔案可能被截斷）：{e}"),
+                })?;
+            remaining -= chunk as u64;
+        }
+        Ok(())
     }
 
     fn u32(&mut self) -> Result<u32, ColmapError> {
@@ -354,7 +441,7 @@ impl Reader {
 pub fn read_cameras_bin(path: &Path) -> Result<HashMap<u32, Camera>, ColmapError> {
     let mut r = Reader::open(path)?;
     let num = r.u64()?;
-    let mut out = HashMap::with_capacity(num as usize);
+    let mut out = HashMap::with_capacity(checked_capacity(&r, num, MIN_CAMERA_BYTES, "相機")?);
     for _ in 0..num {
         let id = r.u32()?;
         let model_id = r.i32()?;
@@ -381,10 +468,15 @@ pub fn read_cameras_bin(path: &Path) -> Result<HashMap<u32, Camera>, ColmapError
 }
 
 /// 讀取 `images.bin`。
+///
+/// **不解析**每張影像的 `points2D`：本專案的自動標註只需要相機位姿，而一張 1080p 影格可能有
+/// 數千個特徵點——原本為每個點做一次 `Vec::push`，等於每兩秒（點雲檢視器的刷新間隔）
+/// 就把整份特徵點表重新配置一次，卻沒有任何地方讀它。
+/// 位元組仍然被完整跳過（`Reader::skip`），所以格式正確性與截斷檢查都保留。
 pub fn read_images_bin(path: &Path) -> Result<Vec<Image>, ColmapError> {
     let mut r = Reader::open(path)?;
     let num = r.u64()?;
-    let mut out = Vec::with_capacity(num as usize);
+    let mut out = Vec::with_capacity(checked_capacity(&r, num, MIN_IMAGE_BYTES, "影像")?);
     for _ in 0..num {
         let id = r.u32()?;
         let mut qvec = [0.0; 4];
@@ -397,31 +489,32 @@ pub fn read_images_bin(path: &Path) -> Result<Vec<Image>, ColmapError> {
         }
         let camera_id = r.u32()?;
         let name = r.string()?;
-        let n = r.u64()?;
-        let mut points2d = Vec::with_capacity(n as usize);
-        for _ in 0..n {
-            let x = r.f64()?;
-            let y = r.f64()?;
-            let pid = r.i64()?;
-            points2d.push((x, y, pid));
-        }
+        let points2d = r.u64()?;
+        let bytes = points2d
+            .checked_mul(POINT2D_BYTES)
+            .ok_or_else(|| ColmapError::Format {
+                file: path.display().to_string(),
+                detail: format!("影像 {id} 的特徵點數 {points2d} 不合理（位元組數溢位）"),
+            })?;
+        r.skip(bytes)?;
         out.push(Image {
             id,
             qvec,
             tvec,
             camera_id,
             name,
-            points2d,
         });
     }
     Ok(out)
 }
 
 /// 讀取 `points3D.bin`。
+///
+/// 每點的 `error`（重投影誤差，f64）在本專案沒有用途，因此跳過不存。
 pub fn read_points3d_bin(path: &Path) -> Result<Vec<Point3D>, ColmapError> {
     let mut r = Reader::open(path)?;
     let num = r.u64()?;
-    let mut out = Vec::with_capacity(num as usize);
+    let mut out = Vec::with_capacity(checked_capacity(&r, num, MIN_POINT_BYTES, "三維點")?);
     for _ in 0..num {
         let id = r.i64()?;
         let mut xyz = [0.0; 3];
@@ -429,9 +522,10 @@ pub fn read_points3d_bin(path: &Path) -> Result<Vec<Point3D>, ColmapError> {
             *v = r.f64()?;
         }
         let rgb = [r.u8()?, r.u8()?, r.u8()?];
-        let error = r.f64()?;
+        r.skip(8)?; // error: f64（未使用）
         let track_len = r.u64()?;
-        let mut track = Vec::with_capacity(track_len as usize);
+        let mut track =
+            Vec::with_capacity(checked_capacity(&r, track_len, TRACK_ENTRY_BYTES, "track")?);
         for _ in 0..track_len {
             let image_id = r.u32()?;
             let point2d_idx = r.u32()?;
@@ -441,7 +535,6 @@ pub fn read_points3d_bin(path: &Path) -> Result<Vec<Point3D>, ColmapError> {
             id,
             xyz,
             rgb,
-            error,
             track,
         });
     }
@@ -476,9 +569,12 @@ pub fn quaternion_to_rotation(q: &[f64; 4]) -> [[f64; 3]; 3] {
     ]
 }
 
-/// 相機座標 → 像素座標（含徑向與切向畸變）。
+/// 相機座標 → 像素座標（針孔模型＋Brown 徑向／切向畸變）。
 ///
 /// 回傳 `None` 表示該點在相機後方（`z <= 0`），也就是不可見。
+///
+/// **這個函式對非針孔模型只是近似**：請先看 `CameraModel::projection_is_approximate`，
+/// 需要對使用者誠實說明框位可能偏移時（自動標註就是如此），必須把近似講出來。
 pub fn camera_to_pixel(point: [f64; 3], camera: &Camera) -> Option<(f64, f64, f64)> {
     let (z, x, y) = (point[2], point[0], point[1]);
     if !z.is_finite() || z <= 1e-9 {
@@ -501,11 +597,6 @@ pub fn camera_to_pixel(point: [f64; 3], camera: &Camera) -> Option<(f64, f64, f6
         b = ay + p1 * (r2 + 2.0 * ay * ay) + 2.0 * p2 * ax * ay;
     }
     Some((fx * a + cx, fy * b + cy, z))
-}
-
-/// 世界座標 → 像素座標（一步完成）。
-pub fn world_to_pixel(world: [f64; 3], image: &Image, camera: &Camera) -> Option<(f64, f64, f64)> {
-    camera_to_pixel(image.to_camera(world), camera)
 }
 
 #[cfg(test)]
@@ -559,12 +650,46 @@ mod tests {
             tvec: [0.0, 0.0, 0.0],
             camera_id: 1,
             name: "a.jpg".into(),
-            points2d: vec![],
         };
-        let (u, v, z) = world_to_pixel([0.0, 0.0, 5.0], &image, &camera).expect("應可投影");
+        let (u, v, z) =
+            camera_to_pixel(image.to_camera([0.0, 0.0, 5.0]), &camera).expect("應可投影");
         assert!((u - 320.0).abs() < 1e-9 && (v - 240.0).abs() < 1e-9 && (z - 5.0).abs() < 1e-9);
         // 相機後方的點不可見
-        assert!(world_to_pixel([0.0, 0.0, -5.0], &image, &camera).is_none());
+        assert!(camera_to_pixel(image.to_camera([0.0, 0.0, -5.0]), &camera).is_none());
+    }
+
+    /// 投影近似性：哪些模型只能近似、哪些是真的針孔。
+    ///
+    /// 這是標註警示的依據，因此逐個模型列出期望值；`FullOpenCv` 也被視為近似，
+    /// 因為 `radial_distortion` 只取 k1、k2，k3~k6 從未被使用。
+    #[test]
+    fn flags_models_whose_projection_is_only_approximate() {
+        use CameraModel::*;
+        for model in [
+            OpenCvFisheye,
+            SimpleRadialFisheye,
+            RadialFisheye,
+            ThinPrismFisheye,
+        ] {
+            assert!(model.is_fisheye(), "{model:?} 應被視為魚眼");
+            assert!(
+                model.projection_is_approximate(),
+                "{model:?} 的投影只是近似，必須被標記"
+            );
+        }
+        for model in [Fov, FullOpenCv] {
+            assert!(!model.is_fisheye(), "{model:?} 不是魚眼");
+            assert!(
+                model.projection_is_approximate(),
+                "{model:?} 有未實作的畸變項，必須被標記為近似"
+            );
+        }
+        for model in [SimplePinhole, Pinhole, SimpleRadial, Radial, OpenCv] {
+            assert!(
+                !model.projection_is_approximate(),
+                "{model:?} 是完整實作的模型，不該被標記為近似"
+            );
+        }
     }
 
     /// 相機中心公式：t = 0 時相機在世界原點；t 平移後位置應反向。
@@ -576,7 +701,6 @@ mod tests {
             tvec: [1.0, 2.0, 3.0],
             camera_id: 1,
             name: "a.jpg".into(),
-            points2d: vec![],
         };
         let c = image.camera_center();
         assert!(
@@ -589,6 +713,10 @@ mod tests {
 
     /// 寫出一份最小的 cameras.bin / images.bin / points3D.bin，再讀回來比對。
     /// 這是本模組最容易出錯的地方（欄位順序與型別），所以用真實二進位做往返測試。
+    ///
+    /// `images.bin` 刻意寫**兩張**影像、且第一張帶有 2 個 2D 特徵點：
+    /// 本模組跳過那些位元組而不解析，若跳過的長度算錯，第二張影像的欄位就會整組錯位，
+    /// 這個測試因此同時守住「跳過」的正確性。
     #[test]
     fn binary_round_trip_matches_colmap_layout() {
         let cam_path = temp_path("cameras.bin");
@@ -607,9 +735,9 @@ mod tests {
         }
         drop(f);
 
-        // images.bin：1 張影格，2 個 2D 點（其中一個 point3D_id = -1）
+        // images.bin：2 張影格；第一張有 2 個 2D 點（其中一個 point3D_id = -1），第二張 0 個。
         let mut f = File::create(&img_path).unwrap();
-        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
         f.write_all(&3u32.to_le_bytes()).unwrap(); // image_id
         for v in [1.0f64, 0.0, 0.0, 0.0] {
             f.write_all(&v.to_le_bytes()).unwrap();
@@ -626,6 +754,16 @@ mod tests {
         f.write_all(&50.0f64.to_le_bytes()).unwrap();
         f.write_all(&60.0f64.to_le_bytes()).unwrap();
         f.write_all(&(-1i64).to_le_bytes()).unwrap();
+        f.write_all(&4u32.to_le_bytes()).unwrap(); // image_id
+        for v in [0.0f64, 1.0, 0.0, 0.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        for v in [-1.0f64, -2.0, -3.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        f.write_all(&7u32.to_le_bytes()).unwrap(); // camera_id
+        f.write_all(b"frame_0002.jpg\0").unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();
         drop(f);
 
         // points3D.bin：1 個點，track 長度 1
@@ -649,14 +787,17 @@ mod tests {
         assert_eq!(cam.intrinsics(), (1000.0, 1000.0, 960.0, 540.0));
 
         let images = read_images_bin(&img_path).expect("images.bin 應可讀取");
-        assert_eq!(images.len(), 1);
+        assert_eq!(images.len(), 2);
         assert_eq!(images[0].id, 3);
         assert_eq!(images[0].camera_id, 7);
         assert_eq!(images[0].name, "frame_0001.jpg");
         assert_eq!(images[0].qvec, [1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(images[0].points2d.len(), 2);
-        assert_eq!(images[0].points2d[0], (12.5, 34.5, 99));
-        assert_eq!(images[0].points2d[1].2, -1);
+        assert_eq!(images[0].tvec, [0.1, 0.2, 0.3]);
+        // 第二張影像的欄位必須完全正確——這是「跳過 2D 特徵點」沒有算錯長度的證據
+        assert_eq!(images[1].id, 4);
+        assert_eq!(images[1].name, "frame_0002.jpg");
+        assert_eq!(images[1].qvec, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(images[1].tvec, [-1.0, -2.0, -3.0]);
 
         let points = read_points3d_bin(&pts_path).expect("points3D.bin 應可讀取");
         assert_eq!(points.len(), 1);
@@ -678,6 +819,90 @@ mod tests {
         f.write_all(&2u64.to_le_bytes()).unwrap(); // 聲稱有 2 台相機，但後面沒資料
         drop(f);
         let err = read_cameras_bin(&path).expect_err("應報錯");
+        assert!(
+            matches!(err, ColmapError::Format { .. }),
+            "錯誤型別應為 Format，實際：{err:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **關鍵回歸測試**：檔頭聲稱的數量離譜時必須回錯誤，而不是配置記憶體而 abort。
+    ///
+    /// 失效鏈：`num` 直接來自檔案的 u64。損壞的檔案（或根本不是 COLMAP 輸出的檔案）
+    /// 只要前 8 位元組剛好是非零的大數，`Vec::with_capacity(num as usize)` 就會嘗試配置
+    /// 天文數字般的記憶體。**配置失敗是 abort，`Result` 接不住**——UI 不會顯示錯誤，而是整個行程消失。
+    /// 因此數量必須先與檔案長度交叉檢查。
+    #[test]
+    fn absurd_element_counts_are_rejected_without_allocating() {
+        let cam_path = temp_path("absurd-cameras.bin");
+        let mut f = File::create(&cam_path).unwrap();
+        f.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        drop(f);
+        let err = read_cameras_bin(&cam_path).expect_err("u64::MAX 台相機不可能存在");
+        assert!(
+            matches!(err, ColmapError::Format { .. }),
+            "錯誤型別應為 Format，實際：{err:?}"
+        );
+
+        // 數量「看似合理」但遠超檔案長度所能容納 → 一樣要擋
+        let mut f = File::create(&cam_path).unwrap();
+        f.write_all(&10_000_000u64.to_le_bytes()).unwrap();
+        drop(f);
+        assert!(read_cameras_bin(&cam_path).is_err());
+
+        // images.bin 與 points3D.bin 走同一條路徑，也要擋
+        let img_path = temp_path("absurd-images.bin");
+        let mut f = File::create(&img_path).unwrap();
+        f.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        drop(f);
+        assert!(read_images_bin(&img_path).is_err());
+
+        let pts_path = temp_path("absurd-points.bin");
+        let mut f = File::create(&pts_path).unwrap();
+        f.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        drop(f);
+        assert!(read_points3d_bin(&pts_path).is_err());
+
+        // track 長度同樣來自檔案，也要擋（一個點宣稱有 u64::MAX 筆觀測）
+        let track_path = temp_path("absurd-track.bin");
+        let mut f = File::create(&track_path).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap(); // 1 個點
+        f.write_all(&1i64.to_le_bytes()).unwrap();
+        for v in [0.0f64, 0.0, 0.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        f.write_all(&[1u8, 2, 3]).unwrap();
+        f.write_all(&0.0f64.to_le_bytes()).unwrap();
+        f.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        drop(f);
+        assert!(read_points3d_bin(&track_path).is_err());
+
+        let _ = std::fs::remove_file(cam_path);
+        let _ = std::fs::remove_file(img_path);
+        let _ = std::fs::remove_file(pts_path);
+        let _ = std::fs::remove_file(track_path);
+    }
+
+    /// 即使 2D 特徵點不再被解析，那些位元組仍必須真的存在：
+    /// 檔案在特徵點區段被截斷時要報錯，而不是安靜地讀出錯位的資料。
+    #[test]
+    fn truncated_feature_section_still_reports_error() {
+        let path = temp_path("truncated-points2d.bin");
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        for v in [1.0f64, 0.0, 0.0, 0.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        for v in [0.0f64, 0.0, 0.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        f.write_all(&7u32.to_le_bytes()).unwrap();
+        f.write_all(b"a.jpg\0").unwrap();
+        f.write_all(&5u64.to_le_bytes()).unwrap(); // 聲稱 5 個 2D 點（需要 120 位元組）
+        f.write_all(&[0u8; 24]).unwrap(); // 只給 1 個
+        drop(f);
+        let err = read_images_bin(&path).expect_err("截斷應報錯");
         assert!(
             matches!(err, ColmapError::Format { .. }),
             "錯誤型別應為 Format，實際：{err:?}"

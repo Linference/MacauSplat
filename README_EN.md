@@ -1,13 +1,22 @@
-# OOOSplat
+# MacauSplat
 
 [中文](README.md) | [English](README_EN.md)
 
 <p align="center">
-  <img src="assets/logo-master-1024.png" alt="OOOSplat Logo" width="180">
+  <a href="https://github.com/Linference/MacauSplat/releases"><strong>⬇️ Download MacauSplat builds (Windows / macOS / Ubuntu)</strong></a>
 </p>
 
+# OOOSplat (upstream documentation, retained as the original reconstruction reference)
+
+> **Upstream original document (for reference only)**
+> Everything below this line is the original documentation of the upstream project OOOSplat, retained as a
+> technical reference for the reconstruction pipeline.
+> It describes the upstream product, not the MacauSplat distribution; the two use different installer names
+> and different download locations.
+> Upstream project: <https://github.com/ooolabdev/ooosplat> (Apache-2.0, author ooolabdev)
+
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>⬇️ Download OOOSplat 0.4.1 for Windows, macOS, or Ubuntu</strong></a>
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>Upstream OOOSplat 0.4.1 release (not this project)</strong></a>
 </p>
 
 OOOSplat is a local desktop application that turns an ordinary orbit video or image sequence into a 3D Gaussian Splatting project in one workflow. Choose source media, a project directory, and a quality preset, and OOOSplat automatically handles image preparation, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
@@ -131,18 +140,18 @@ sudo apt install -y \
 
 Install a working Vulkan driver for the graphics adapter, such as the proprietary NVIDIA driver or Mesa for AMD/Intel. Ubuntu 24.04's non-CUDA COLMAP package automatically uses the CPU, while Brush selects an available graphics backend at runtime. Fully CPU-only software Vulkan has not yet been validated end to end.
 
-After downloading the `OOOSplat-0.4.1-x64-linux` Artifact from GitHub Actions, install it with:
+After downloading the `MacauSplat-0.4.1-x64-linux` Artifact from GitHub Actions (the same directory contains `SHA256SUMS.txt` so the installer hash can be checked first), install it with:
 
 ```bash
-sudo apt install ./OOOSplat-0.4.1-x64-linux.deb
+sudo apt install ./MacauSplat-0.4.1-x64-linux.deb
 ```
 
 The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package manager; the pinned Brush runtime is included in the package.
 
 ## Installation and Use
 
-1. On Windows, run `OOOSplat-0.4.1-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.4.1-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.4.1-x64-linux.deb`.
-2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
+1. On Windows, run `MacauSplat-0.4.1-x64-windows.exe`. On an Apple Silicon Mac, open `MacauSplat-0.4.1-arm64-macos.dmg` and drag MacauSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./MacauSplat-0.4.1-x64-linux.deb`. Each platform's artifact directory also ships a `SHA256SUMS.txt` for verifying the installer.
+2. Start MacauSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
 3. Under “01 Create New Task,” choose Video or Images from the input-type menu, then click the input field to select a video file or image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
 5. Select the Fast, Balanced, or Detailed quality preset.
@@ -308,21 +317,59 @@ npm run verify:licenses
 
 ### Build the Windows Installer
 
+Run `npm run setup:engines` before the first build (engine binaries are not committed to Git), then:
+
 ```powershell
 npm run package:windows
 ```
 
+`package:windows` runs `verify:telemetry:release`, then `stage:cli`, then the NSIS build, and finally collects
+the output with `node scripts/collect-windows-installer.mjs`. The `stage:cli` step cannot be skipped: Tauri's
+build script asserts that `bundle.externalBin` — `src-tauri/binaries/splatstudio-<triple>.exe` — exists, and
+that file is a gitignored build product, so a clean checkout fails during the cargo phase without it.
+
 The NSIS installer is written to:
 
 ```text
-dist-artifacts\OOOSplat-0.4.1-x64-windows.exe
+dist-artifacts\MacauSplat-0.4.1-x64-windows.exe
 ```
 
-Run `npm run setup:engines` before the first build. Tauri's `beforeBuildCommand` automatically runs the engine checks and frontend production build, but it does not access the network implicitly during packaging.
+`npm run package:linux` (`--bundles deb`) and `npm run package:macos` (`--bundles app,dmg`) follow the same
+shape, each staging the CLI before bundling. Tauri's `beforeBuildCommand` automatically runs the engine checks
+and frontend production build, but it does not access the network implicitly during packaging.
 
 ## CLI
 
-The repository also provides the `splatstudio` diagnostic CLI:
+The repository also provides the `splatstudio` diagnostic CLI. Both installer users and source builders can use
+it: the installers ship the CLI alongside the main application, so no Rust toolchain or source checkout is
+required. The `cargo run` form below is only for developing from source.
+
+### CLI bundled with the installer (no source checkout)
+
+The Windows NSIS installer ships `splatstudio.exe` **next to the main application executable**, that is, in the
+same installation directory as `MacauSplat.exe`. The CLI is therefore already available after installing — no
+Rust toolchain and no source checkout required. The Ubuntu `.deb` and macOS `.dmg` bundles ship `splatstudio`
+together with the main application in the same way.
+
+```powershell
+# After installation the CLI sits next to the main executable (default install directory)
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" health
+
+# Check whether an existing project has what automatic annotation needs
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" inspect "D:\Splats\MyProject"
+
+# Fit a 3D bounding box from the sparse cloud, then project it into YOLO labels
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" fit-box "D:\Splats\MyProject" --out out\
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" annotate "D:\Splats\MyProject" --box-path out\box.json --class-id 0 --out out\
+```
+
+If `splatstudio.exe` is not on `PATH`, run it with its full path (as above), or add the install directory to `PATH`.
+
+Subcommands: `health`, `probe`, `plan`, `extract`, `generate`, `inspect`, `fit-box`, `annotate`, `monitor`, `cloud`.
+`inspect`, `fit-box`, and `annotate` are this project's automatic-annotation additions; the rest are the upstream
+diagnostic commands.
+
+Source build (developers):
 
 ```powershell
 # Check all bundled engines

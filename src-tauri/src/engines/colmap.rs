@@ -376,9 +376,16 @@ pub async fn map(
     .await
 }
 
+/// 中間快照的目錄名稱（放在稀疏模型目錄底下，與最終模型 `0/` 分開）。
+///
+/// 為什麼是常數：`pipeline::runner` 挑選「最終稀疏模型」時必須**排除**這個目錄，
+/// 否則正在長大的中間快照可能被當成最終模型餵給 Brush 訓練。
+/// 兩邊共用同一個字串，才不會有一邊改了名字、另一邊還在用舊名字。
+pub const SNAPSHOT_DIRECTORY_NAME: &str = "snapshots";
+
 /// 中間快照的輸出目錄（與最終稀疏模型分開，避免污染 `sparse/0`）。
 pub fn snapshot_directory(output: &Path) -> Option<PathBuf> {
-    Some(output.join("snapshots"))
+    Some(output.join(SNAPSHOT_DIRECTORY_NAME))
 }
 
 #[cfg(test)]

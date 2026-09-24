@@ -35,6 +35,7 @@ const requiredFiles = [
   "GENERATED_OUTPUTS.md",
   "licenses/THIRD_PARTY_NOTICES.txt",
   "licenses/FFmpeg-LGPL-2.1.txt",
+  "licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
   "licenses/COLMAP-LICENSE.txt",
   "licenses/NVIDIA-CUDA-Runtime.txt",
   "licenses/Brush-LICENSE.txt",
@@ -56,12 +57,30 @@ assert(
   "LICENSE is not the unmodified Apache License 2.0 text.",
 );
 
+const tauri = JSON.parse(readText("src-tauri/tauri.conf.json"));
+const tauriIdentity = { productName: tauri.productName, version: tauri.version };
 const packageJson = JSON.parse(readText("package.json"));
 assert(packageJson.license === "Apache-2.0", "package.json must declare Apache-2.0.");
-assert(packageJson.author === "ooolabdev", "package.json must identify ooolabdev as author.");
+// The distributable is MacauSplat, so package.json must identify this project and
+// its own repository. Reusing the upstream package identity in package.json would
+// make the shipped metadata claim to be OOOSplat, which contradicts NOTICE and
+// docs/COMPLIANCE.md (and Apache-2.0 Section 6 does not grant the upstream marks).
+assert(packageJson.author === "Linference", "package.json must identify Linference as author.");
 assert(
-  packageJson.repository?.url === "git+https://github.com/ooolabdev/ooosplat.git",
-  "package.json repository URL is incorrect.",
+  packageJson.repository?.url === "git+https://github.com/Linference/MacauSplat.git",
+  "package.json repository URL must identify this fork, not upstream OOOSplat.",
+);
+assert(
+  packageJson.upstream?.url === "https://github.com/ooolabdev/ooosplat",
+  "package.json must record the upstream OOOSplat project under an explicit `upstream` field.",
+);
+assert(
+  !JSON.stringify(packageJson).includes("ooolabdev/ooosplat.git"),
+  "package.json still points at the upstream OOOSplat repository as its own repository.",
+);
+assert(
+  tauriIdentity.productName === "MacauSplat" && tauriIdentity.version,
+  "Tauri product identity must be MacauSplat.",
 );
 
 const cargo = readText("src-tauri/Cargo.toml");
@@ -72,9 +91,6 @@ assert(
   "Cargo.toml repository URL is incorrect.",
 );
 
-const tauri = JSON.parse(readText("src-tauri/tauri.conf.json"));
-assert(tauri.bundle?.license === "Apache-2.0", "Tauri bundle license must be Apache-2.0.");
-assert(tauri.bundle?.licenseFile === "../LICENSE", "Tauri bundle licenseFile must point to ../LICENSE.");
 for (const resource of [
   "../LICENSE",
   "../NOTICE",
@@ -82,6 +98,7 @@ for (const resource of [
   "../GENERATED_OUTPUTS.md",
   "../licenses/THIRD_PARTY_NOTICES.txt",
   "../licenses/FFmpeg-LGPL-2.1.txt",
+  "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
   "../licenses/COLMAP-LICENSE.txt",
   "../licenses/NVIDIA-CUDA-Runtime.txt",
   "../licenses/Brush-LICENSE.txt",
@@ -89,6 +106,19 @@ for (const resource of [
   "../licenses/Mediabunny-MPL-2.0.txt",
 ]) {
   assert(Object.hasOwn(tauri.bundle?.resources ?? {}, resource), `Tauri resources are missing ${resource}.`);
+}
+
+// LGPL-2.1 Section 6 makes the corresponding-source offer a condition of
+// distributing the LGPL FFmpeg object code. The offer must ship inside every
+// platform bundle, so each platform override must also map the file: a platform
+// config that replaces `bundle.resources` instead of merging it would silently
+// drop the offer from that installer.
+for (const platformConfig of ["tauri.windows.conf.json", "tauri.linux.conf.json", "tauri.macos.conf.json"]) {
+  const platform = JSON.parse(readText(`src-tauri/${platformConfig}`));
+  assert(
+    Object.hasOwn(platform.bundle?.resources ?? {}, "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt"),
+    `${platformConfig} resources are missing the LGPL corresponding-source offer.`,
+  );
 }
 
 const tauriWindows = JSON.parse(readText("src-tauri/tauri.windows.conf.json"));
@@ -175,12 +205,111 @@ assert(/^[A-F0-9]{40}$/.test(macosManifest.buildEnvironment?.homebrewCoreCommit)
 assert(macosManifest.buildEnvironment?.runner === "macos-15", "macOS engine runner must be pinned to macos-15.");
 assert(macosManifest.buildEnvironment?.usePinnedHomebrewBottles === true, "macOS build dependencies must use pinned Homebrew bottles.");
 assert(macosManifest.engines?.length === 3, "macOS manifest must contain the three direct engines.");
+
+// The macOS engine runtime is fetched by scripts/setup-engines-macos.sh from the
+// `distribution` block. Nothing used to verify this block, so a release URL that
+// pointed at a tag which does not exist passed every check and made the macOS CI
+// job fail at download time instead. Verify the block's shape and internal
+// consistency here.
+const macosDistribution = macosManifest.distribution;
+assert(macosDistribution && typeof macosDistribution === "object", "macOS manifest is missing the distribution block.");
+for (const key of ["tag", "archiveName", "sourceUrl", "archiveSha256File", "destination", "integrityFile"]) {
+  assert(
+    typeof macosDistribution[key] === "string" && macosDistribution[key].length > 0,
+    `macOS distribution.${key} must be a non-empty string.`,
+  );
+}
+for (const key of ["tag", "archiveName", "sourceUrl", "archiveSha256File", "destination", "integrityFile"]) {
+  assert(macosDistribution[key] === macosDistribution[key].trim(), `macOS distribution.${key} must not be padded with whitespace.`);
+}
+assert(
+  /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(macosDistribution.tag),
+  `macOS distribution.tag is not a valid git tag: ${macosDistribution.tag}`,
+);
+assert(
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.xz$/.test(macosDistribution.archiveName),
+  `macOS distribution.archiveName must be a .tar.xz archive name: ${macosDistribution.archiveName}`,
+);
+const macosTagVersion = macosDistribution.tag.slice("engines-macos-arm64-".length);
+assert(
+  macosDistribution.archiveName.includes(macosTagVersion),
+  `macOS distribution.archiveName must contain the version '${macosTagVersion}' from distribution.tag.`,
+);
+assert(
+  macosDistribution.destination === "engines/macos/arm64",
+  "macOS distribution.destination must be engines/macos/arm64 to match the Tauri resource mapping.",
+);
+assert(
+  macosDistribution.archiveName.startsWith("macausplat-"),
+  "macOS distribution.archiveName must use this project's name; released artifact names are brand elements.",
+);
+assert(
+  macosDistribution.sourceUrl ===
+    `https://github.com/Linference/MacauSplat/releases/download/${macosDistribution.tag}/${macosDistribution.archiveName}`,
+  "macOS distribution.sourceUrl must resolve to this project's own release asset, built from the tag it names.",
+);
+assert(
+  macosDistribution.archiveSha256File === `${macosDistribution.sourceUrl}.sha256`,
+  "macOS distribution.archiveSha256File must be the .sha256 sibling of distribution.sourceUrl.",
+);
+assert(
+  !macosDistribution.sourceUrl.includes("/latest/"),
+  "macOS distribution.sourceUrl must reference an immutable release asset, not /latest/.",
+);
+assert(
+  typeof macosManifest.distribution.publishedBy === "string" && macosManifest.distribution.publishedBy.length > 0,
+  "macOS distribution.publishedBy must record who publishes the engine archive.",
+);
+assert(
+  macosManifest.distribution.buildFallback === "scripts/build-engines-macos.sh",
+  "macOS distribution.buildFallback must name the reproducible local build script.",
+);
+assert(
+  macosManifest.distribution.archiveLayoutRoot === "macausplat-engines-macos-arm64",
+  "macOS distribution.archiveLayoutRoot must match the directory the engine archive extracts to.",
+);
+// Both scripts must derive the extracted layout from this manifest field rather
+// than hard-coding it, so the manifest stays the single source of truth.
+for (const script of ["scripts/setup-engines-macos.sh", "scripts/build-engines-macos.sh"]) {
+  assertContains(
+    readText(script),
+    "distribution.archiveLayoutRoot",
+    `${script} (must read distribution.archiveLayoutRoot from the manifest)`,
+  );
+}
+// scripts/setup-engines-macos.sh releases into and scripts/build-engines-macos.sh
+// archives out of a directory named after distribution.archiveName's stem, and
+// .github/workflows/macos-engines.yml must guard its tag against distribution.tag.
+assert(
+  existsSync(workspacePath("scripts/build-engines-macos.sh")),
+  "macOS distribution.buildFallback script is missing.",
+);
+const macosEnginesWorkflow = readText(".github/workflows/macos-engines.yml");
+assertContains(macosEnginesWorkflow, "distribution.tag", "macos-engines.yml");
+assertContains(
+  macosEnginesWorkflow,
+  "engines-macos-arm64-v",
+  "macos-engines.yml (the tag prefix the workflow publishes)",
+);
+assert(
+  macosDistribution.tag.startsWith("engines-macos-arm64-v"),
+  "macOS distribution.tag must use the engines-macos-arm64-v prefix that macos-engines.yml publishes.",
+);
+
 for (const engine of macosManifest.engines) {
   const expected = expectedEngines.get(engine.name);
   assert(expected, `Unexpected macOS engine: ${engine.name}`);
   assert(engine.license === expected.license, `${engine.name} macOS license identifier is incorrect.`);
   assert(engine.licenseFiles?.length === 1 && engine.licenseFiles[0] === expected.file, `${engine.name} macOS license mapping is incorrect.`);
   assert(/^[A-F0-9]{64}$/.test(engine.sourceSha256), `${engine.name} macOS source SHA-256 is invalid.`);
+  assert(
+    /^https:\/\//.test(engine.sourceUrl ?? ""),
+    `${engine.name} macOS source URL must be an absolute https URL.`,
+  );
+  assert(
+    engine.buildPolicy?.length > 0,
+    `${engine.name} macOS buildPolicy must describe how the runtime was produced so the notices can be checked against it.`,
+  );
 }
 for (const marker of [
   "macOS 15+ Apple Silicon arm64",
@@ -228,6 +357,51 @@ assertContains(ffmpegLicense, "GNU LESSER GENERAL PUBLIC LICENSE", "FFmpeg licen
 assertContains(ffmpegLicense, "Version 2.1, February 1999", "FFmpeg license");
 assert(!ffmpegLicense.includes("Version 3, 29 June 2007"), "FFmpeg license still contains the LGPLv3 text.");
 
+// LGPL-2.1 Section 6 requires a written offer of the corresponding source when the
+// LGPL object code is distributed without it. Shipping only the license text and a
+// link to ffmpeg.org does not discharge that obligation, so the offer document and
+// its packaging are enforced here.
+const correspondingSource = readText("licenses/FFmpeg-CORRESPONDING-SOURCE.txt");
+for (const marker of [
+  "Written offer under GNU Lesser General Public License v2.1, Section 6",
+  "How to obtain the corresponding source",
+  "How this Object Code was built",
+  "Relinking (LGPL v2.1 Section 6(b))",
+  "https://github.com/Linference/MacauSplat/issues",
+]) {
+  assertContains(correspondingSource, marker, "FFmpeg corresponding-source offer");
+}
+assertContains(correspondingSource, windowsFfmpeg.sourceUrl, "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, windowsFfmpeg.archiveSha256, "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "win64-lgpl-shared", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "variants/win64-lgpl-shared.sh", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "variants/defaults-lgpl.sh", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "LICENSE_FILE=COPYING.LGPLv3", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "build.sh", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, "ffmpeg.exe -buildconf", "FFmpeg corresponding-source offer");
+assertContains(correspondingSource, windowsFfmpeg.actualVersion, "FFmpeg corresponding-source offer");
+// The offer must be reachable from the installer, referenced by the notices, and
+// listed as a packaged resource; otherwise it exists only in the repository.
+assertContains(thirdParty, "licenses/FFmpeg-CORRESPONDING-SOURCE.txt", "THIRD_PARTY_NOTICES.txt");
+assert(
+  Object.hasOwn(tauri.bundle?.resources ?? {}, "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt"),
+  "Tauri resources are missing the LGPL corresponding-source offer.",
+);
+// The release source archive the offer points at is the same archive the macOS
+// engine manifest pins, so the two records must not drift apart.
+const macosFfmpeg = macosManifest.engines.find((engine) => engine.name === "FFmpeg / FFprobe");
+assert(macosFfmpeg, "macOS FFmpeg engine entry is missing.");
+assertContains(
+  correspondingSource,
+  macosFfmpeg.sourceUrl,
+  "FFmpeg corresponding-source offer (release archive URL)",
+);
+assertContains(
+  correspondingSource,
+  macosFfmpeg.sourceSha256,
+  "FFmpeg corresponding-source offer (release archive SHA-256)",
+);
+
 const colmapLicense = readText("licenses/COLMAP-LICENSE.txt");
 for (const marker of [
   "ETH Zurich and UNC Chapel Hill",
@@ -259,5 +433,7 @@ for (const term of [
 }
 
 console.log(
-  "Verified OOOSplat license metadata, Windows/Linux/macOS engine notices, PlayCanvas preview notices, and Mediabunny video export notices.",
+  "Verified MacauSplat license metadata, the LGPL FFmpeg corresponding-source offer, " +
+    "Windows/Linux/macOS engine notices and distribution manifests, PlayCanvas preview " +
+    "notices, and Mediabunny video export notices.",
 );

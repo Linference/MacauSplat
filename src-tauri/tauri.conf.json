@@ -8,8 +8,7 @@
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
-  },
-  "app": {
+  },  "app": {
     "windows": [
       {
         "title": "MacauSplat",
@@ -48,6 +47,7 @@
     "resources": {
       "../licenses/THIRD_PARTY_NOTICES.txt": "licenses/THIRD_PARTY_NOTICES.txt",
       "../licenses/FFmpeg-LGPL-2.1.txt": "licenses/FFmpeg-LGPL-2.1.txt",
+      "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt": "licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
       "../licenses/COLMAP-LICENSE.txt": "licenses/COLMAP-LICENSE.txt",
       "../licenses/NVIDIA-CUDA-Runtime.txt": "licenses/NVIDIA-CUDA-Runtime.txt",
       "../licenses/Brush-LICENSE.txt": "licenses/Brush-LICENSE.txt",

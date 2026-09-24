@@ -1,11 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "npm run build:bundle:macos"
+  },
   "bundle": {
     "targets": [
       "app",
       "dmg"
     ],
     "resources": {
+      "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt": "licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
       "../engines/manifest.macos.json": "engines/manifest.macos.json",
       "../engines/macos/arm64/": "engines/macos/arm64/"
     },

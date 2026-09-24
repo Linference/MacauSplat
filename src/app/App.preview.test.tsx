@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
-import { LanguageProvider } from "../i18n";
+import { LanguageProvider, translate } from "../i18n";
 import type { ProjectSummary } from "../types/pipeline";
 
 const mocks = vi.hoisted(() => ({
@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   resumePipeline: vi.fn(),
   getAppRuntimeStatus: vi.fn(),
   getProjectOverview: vi.fn(),
+  getSnapshotCloud: vi.fn(),
   initializeTelemetry: vi.fn(),
   setTelemetryConsent: vi.fn(),
   selectVideo: vi.fn(),
@@ -41,6 +42,8 @@ vi.mock("../lib/backend", () => ({
   exportPly: mocks.exportPly,
   getAppRuntimeStatus: mocks.getAppRuntimeStatus,
   getProjectOverview: mocks.getProjectOverview,
+  // PointCloudViewer 是 lazy 載入的，mock 工廠必須匯出它會用到的每個函式
+  getSnapshotCloud: mocks.getSnapshotCloud,
   initializeTelemetry: mocks.initializeTelemetry,
   onPipelineEvent: vi.fn().mockResolvedValue(() => undefined),
   prepareGaussianPreview: mocks.prepareGaussianPreview,
@@ -112,6 +115,7 @@ describe("App preview workspace", () => {
       video: null, imageSequence: null, plan: null, estimate: null, engines: [], phase: "idle", progress: 0, progressMessage: "",
       latestEvent: null, events: [], result: null, error: null,
     });
+    mocks.annotateProject.mockReset();
     mocks.prepareGaussianPreview.mockReset();
     mocks.cancelPipeline.mockReset().mockResolvedValue(undefined);
     mocks.estimateProjectRuntime.mockReset().mockResolvedValue({
@@ -139,6 +143,17 @@ describe("App preview workspace", () => {
       logsDirectory: `${project.projectPath}\\logs`,
     });
     mocks.getProjectOverview.mockReset().mockResolvedValue({ projectsRoot: "E:\\Projects", projects: [project] });
+    mocks.getSnapshotCloud.mockReset().mockResolvedValue({
+      positions: [0, 1, 0, -1, -1, 0, 1, -1, 0],
+      colors: [255, 0, 0, 0, 255, 0, 0, 0, 255],
+      point_count: 3,
+      total_points: 3,
+      cameras: [0, 0, -4, 0, 0.5, -3.5],
+      bounds: [-1, -2, -1, 1, 2, 1],
+      snapshot: "3",
+      snapshot_count: 3,
+      is_final: false,
+    });
     mocks.initializeTelemetry.mockReset().mockResolvedValue({ analyticsEnabled: true, consentDecided: true, deliveryStatus: "configured" });
     mocks.setTelemetryConsent.mockReset().mockResolvedValue({ analyticsEnabled: true, consentDecided: true, deliveryStatus: "configured" });
     mocks.selectVideo.mockReset().mockResolvedValue(null);
@@ -726,8 +741,12 @@ describe("App preview workspace", () => {
     const buttons = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"),
     );
-    const target = buttons.find((button) => (button.textContent ?? "").includes("產生標註"));
-    expect(target, `找不到「產生標註」按鈕；現有：${buttons.map((b) => b.textContent).join(" / ")}`).toBeTruthy();
+    // 用 t() 產生的文字定位，避免測試與文案耦合；同時確認用的是简体
+    const annotationLabel = translate("zh-CN", "annotation.run");
+    expect(annotationLabel).toBe("生成标注");
+    expect(container.textContent).not.toContain("產生標註");
+    const target = buttons.find((button) => (button.textContent ?? "").includes(annotationLabel));
+    expect(target, `找不到「${annotationLabel}」按鈕；現有：${buttons.map((b) => b.textContent).join(" / ")}`).toBeTruthy();
     await act(async () => (target as HTMLButtonElement).click());
     await flush();
 
@@ -738,6 +757,134 @@ describe("App preview workspace", () => {
     expect(panel?.textContent).toContain("49");
     expect(panel?.textContent).toContain("273");
     expect(panel?.textContent).toContain("12.70");
+  });
+
+  it("does not send a second annotation command while one is in flight", async () => {
+    let finishAnnotation: ((value: unknown) => void) | undefined;
+    mocks.annotateProject.mockImplementationOnce(() => new Promise((resolve) => { finishAnnotation = resolve; }));
+    const completed = {
+      projectId: project.id,
+      projectPath: project.projectPath,
+      finalPly: `${project.projectPath}/final.ply`,
+      fileSize: 1024,
+      splatCount: 1000,
+      inputImages: 10,
+      registeredImages: 10,
+      registeredRatio: 1,
+      points3d: 100,
+      durationMs: 1000,
+      completedAt: new Date().toISOString(),
+      warning: null,
+      logsDirectory: `${project.projectPath}/logs`,
+    };
+    await act(async () => {
+      useAppStore.setState({ phase: "completed", result: completed, projects: [project] });
+    });
+    await flush();
+
+    const label = translate("zh-CN", "annotation.run");
+    const target = Array.from(container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"))
+      .find((button) => (button.textContent ?? "").includes(label)) as HTMLButtonElement;
+    // 連點兩下：state 版本的守衛要下一次 render 才生效，這裡驗證 ref 守衛擋住了第二次
+    await act(async () => { target.click(); target.click(); });
+
+    expect(mocks.annotateProject).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishAnnotation?.({
+        outputDir: "C:/project/annotation",
+        qaHtml: "C:/project/annotation/qa.html",
+        framesTotal: 10,
+        framesAccepted: 10,
+        acceptanceRatio: 1,
+        boxSize: [1, 1, 1],
+        boxCenter: [0, 0, 0],
+        upAxisEstimated: false,
+        labelsWritten: 10,
+        rejectionReasons: [],
+      });
+    });
+    await flush();
+    expect(container.querySelector(".annotation-result")).not.toBeNull();
+  });
+
+  it("drops a stale annotation summary when the visible result belongs to another project", async () => {
+    mocks.annotateProject.mockResolvedValue({
+      outputDir: "C:/project/annotation",
+      qaHtml: "C:/project/annotation/qa.html",
+      framesTotal: 20,
+      framesAccepted: 20,
+      acceptanceRatio: 1,
+      boxSize: [2, 2, 2],
+      boxCenter: [0, 0, 0],
+      upAxisEstimated: false,
+      labelsWritten: 20,
+      rejectionReasons: [],
+    });
+    const first = {
+      projectId: project.id,
+      projectPath: project.projectPath,
+      finalPly: `${project.projectPath}/final.ply`,
+      fileSize: 1024,
+      splatCount: 1000,
+      inputImages: 20,
+      registeredImages: 20,
+      registeredRatio: 1,
+      points3d: 100,
+      durationMs: 1000,
+      completedAt: new Date().toISOString(),
+      warning: null,
+      logsDirectory: `${project.projectPath}/logs`,
+    };
+    await act(async () => {
+      useAppStore.setState({ phase: "completed", result: first, projects: [project] });
+    });
+    await flush();
+    const label = translate("zh-CN", "annotation.run");
+    const target = Array.from(container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"))
+      .find((button) => (button.textContent ?? "").includes(label)) as HTMLButtonElement;
+    await act(async () => { target.click(); });
+    await flush();
+    expect(container.querySelector(".annotation-result")).not.toBeNull();
+
+    // 換成另一個專案的結果：上一個專案的摘要與 qa.html 連結不該繼續顯示
+    await act(async () => {
+      useAppStore.setState({ result: { ...first, projectId: "other", projectPath: "E:\\Projects\\另一个项目" } });
+    });
+    await flush();
+    expect(container.querySelector(".annotation-result")).toBeNull();
+  });
+
+  it("opens the mapping point cloud viewer from the completed result card", async () => {
+    const result = await mocks.resumePipeline();
+    await act(async () => {
+      useAppStore.setState({ phase: "completed", result, projects: [project] });
+    });
+    await flush();
+
+    const label = translate("zh-CN", "pointcloud.open");
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"))
+      .find((item) => (item.textContent ?? "").includes(label));
+    expect(button, `找不到「${label}」按鈕`).toBeTruthy();
+    await act(async () => { button?.click(); });
+    // lazy 載入要等動態 import 解析完成
+    await flush();
+    await flush();
+    await flush();
+
+    // 進入點雲檢視：工作區被取代，並真的向後端要了這個專案的快照
+    expect(container.querySelector(".topbar")).toBeNull();
+    expect(container.querySelector(".pointcloud-viewer")).not.toBeNull();
+    expect(mocks.getSnapshotCloud).toHaveBeenCalledWith(project.projectPath, 60_000);
+    expect(container.textContent).toContain("建图过程三维点云");
+    // 完成後的檢視不是即時模式
+    expect(container.querySelector(".pointcloud-live")).toBeNull();
+
+    const exit = Array.from(container.querySelectorAll<HTMLButtonElement>(".pointcloud-actions button"))
+      .find((item) => (item.textContent ?? "").includes(translate("zh-CN", "pointcloud.exit")));
+    await act(async () => { exit?.click(); });
+    await flush();
+    expect(container.textContent).toContain("01 创建新任务");
   });
 
   it("restores the low-registration warning from historical project data", async () => {

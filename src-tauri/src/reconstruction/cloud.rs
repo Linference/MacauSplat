@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::colmap::{normalize_name, SparseReconstruction};
+use super::colmap::SparseReconstruction;
 
 /// 一份可渲染的點雲快照。
 #[derive(Debug, Clone, Serialize)]
@@ -118,35 +118,72 @@ pub fn downsample_indices(total: usize, max_points: usize) -> Vec<usize> {
         .collect()
 }
 
-/// 載入最新的快照（若沒有快照則載入最終模型）。
+/// 載入最新的快照（若沒有可用的快照則載入最終模型）。
 ///
-/// `max_points` 為送到前端的點數上限（0 表示不限制）。
+/// **由新到舊取第一份能完整載入的快照**，而不是只試最新那一份。
+/// 為什麼：COLMAP 寫快照不是原子操作——它會先建立目錄，再依序寫
+/// `cameras.bin`／`images.bin`／`points3D.bin`。檢視器每兩秒讀一次，
+/// 很容易正好撞上「目錄已存在、檔案還沒寫完」的那一瞬間。
+/// 舊版遇到這種情況會讓整個 IPC 回錯誤，前端於是把已經畫好的點雲換成錯誤訊息——
+/// 明明前一份快照（甚至最終模型）都還是好的。
+///
+/// 讀取失敗一律降級成 `tracing::debug!`：那是預期中的競態，不是異常。
+/// 只有在**所有**候選都失敗時才回錯誤，而且回的是**最新那份**的失敗原因
+/// （最可能的原因就在那裡，對使用者最有用）。
 pub fn load_snapshot_cloud(
     project_dir: &Path,
     max_points: usize,
 ) -> Result<SnapshotCloud, super::colmap::ColmapError> {
     let snapshots = snapshot_directories(project_dir);
     let snapshot_count = snapshots.len();
-    // 優先看最新快照；沒有快照時退回最終模型（讓「完成後」也能看到結果）
-    let (dir, label, is_final) = match snapshots.last() {
-        Some(dir) => (
-            dir.clone(),
-            dir.file_name().map(|s| s.to_string_lossy().to_string()),
-            false,
-        ),
-        None => match final_model_directory(project_dir) {
-            Some(dir) => (dir, Some("final".to_string()), true),
-            None => return Ok(SnapshotCloud::empty()),
-        },
-    };
-    let reconstruction = SparseReconstruction::load_dir(&dir)?;
-    Ok(build_cloud(
-        &reconstruction,
-        max_points,
-        label,
-        snapshot_count,
-        is_final,
-    ))
+    let mut last_error = None;
+    for dir in snapshots.iter().rev() {
+        match SparseReconstruction::load_dir(dir) {
+            Ok(reconstruction) => {
+                return Ok(build_cloud(
+                    &reconstruction,
+                    max_points,
+                    dir.file_name().map(|s| s.to_string_lossy().to_string()),
+                    snapshot_count,
+                    false,
+                ));
+            }
+            Err(error) => {
+                // 最常見的原因就是 COLMAP 正在寫這一份；換下一份（較舊的）試試
+                tracing::debug!("快照 {dir:?} 尚不可用（{error}），改用較舊的一份");
+                // 只保留第一筆（最新的那一份）的錯誤：全部失敗時要顯示的是它
+                if last_error.is_none() {
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    // 沒有任何快照可讀時，退回最終模型（讓「完成後」仍能看到結果）
+    if let Some(dir) = final_model_directory(project_dir) {
+        match SparseReconstruction::load_dir(&dir) {
+            Ok(reconstruction) => {
+                return Ok(build_cloud(
+                    &reconstruction,
+                    max_points,
+                    Some("final".to_string()),
+                    snapshot_count,
+                    true,
+                ));
+            }
+            Err(error) => {
+                tracing::debug!("最終模型 {dir:?} 也不可用：{error}");
+                if last_error.is_none() {
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    match last_error {
+        // 有快照目錄但全都讀不起來 → 這是真的有問題，必須讓上層看到
+        Some(error) => Err(error),
+        // 專案根本還沒有任何模型
+        None => Ok(SnapshotCloud::empty()),
+    }
 }
 
 /// 由稀疏重建組出可渲染的點雲（抽出來以便測試）。
@@ -231,28 +268,6 @@ pub fn list_snapshots(project_dir: &Path) -> Vec<SnapshotInfo> {
     out
 }
 
-/// 目前註冊影像的檔名清單（給前端顯示「最新註冊的是哪張」）。
-pub fn registered_image_names(project_dir: &Path, limit: usize) -> Vec<String> {
-    let dir = snapshot_directories(project_dir)
-        .last()
-        .cloned()
-        .or_else(|| final_model_directory(project_dir));
-    let Some(dir) = dir else {
-        return Vec::new();
-    };
-    let Ok(reconstruction) = SparseReconstruction::load_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = reconstruction
-        .images
-        .iter()
-        .map(|i| normalize_name(&i.name))
-        .collect();
-    names.sort();
-    names.truncate(limit);
-    names
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::colmap::{Camera, CameraModel, Image, Point3D};
@@ -266,7 +281,6 @@ mod tests {
                 id: i as i64,
                 xyz: [i as f64, (i * 2) as f64, (i % 7) as f64],
                 rgb: [(i % 256) as u8, ((i * 3) % 256) as u8, 200],
-                error: 0.1,
                 track: vec![(1, 0)],
             })
             .collect()
@@ -291,7 +305,6 @@ mod tests {
                 tvec: [0.0, 0.0, 0.0],
                 camera_id: 1,
                 name: "a.jpg".into(),
-                points2d: vec![],
             },
             Image {
                 id: 2,
@@ -299,7 +312,6 @@ mod tests {
                 tvec: [-1.0, 0.0, 0.0],
                 camera_id: 1,
                 name: "b.jpg".into(),
-                points2d: vec![],
             },
         ];
         SparseReconstruction {
@@ -415,8 +427,65 @@ mod tests {
         let list = list_snapshots(&root);
         assert_eq!(list.len(), 3, "兩份快照 + 最終模型：{list:?}");
         assert!(list.last().unwrap().is_final);
-        let names = registered_image_names(&root, 10);
-        assert_eq!(names, vec!["a.jpg".to_string()]);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// **關鍵回歸測試**：COLMAP 正在寫的那份快照不得讓整個檢視器失敗。
+    ///
+    /// 真實情境：`--Mapper.snapshot_path` 會先建立目錄，再依序寫三個 `.bin`。
+    /// 檢視器每兩秒輪詢一次，很容易正好讀到「目錄存在、檔案還沒寫完」的中間狀態。
+    /// 舊版只試最新那一份並直接 `?`，於是 IPC 回錯誤、前端把已經畫好的點雲換成錯誤訊息；
+    /// 正確行為是**退到前一份完整可用的快照**，使用者根本不需要知道有這個競態。
+    #[test]
+    fn falls_back_to_the_previous_snapshot_while_the_newest_is_still_being_written() {
+        let root = std::env::temp_dir().join(format!("macausplat-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let snapshots = root.join("work/colmap/sparse/snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        // 舊快照：完整（3 個點）
+        write_model(&snapshots.join("10"), &["a.jpg"], 3);
+        // 新快照：目錄已建立，但 images.bin 只寫了一半（COLMAP 正在寫）
+        let half_written = snapshots.join("20");
+        std::fs::create_dir_all(&half_written).unwrap();
+        write_model(&half_written, &["a.jpg"], 9);
+        let images = half_written.join("images.bin");
+        let full = std::fs::read(&images).unwrap();
+        std::fs::write(&images, &full[..full.len() / 2]).unwrap();
+
+        let cloud = load_snapshot_cloud(&root, 1000).expect("不該因為最新快照寫到一半而失敗");
+        assert_eq!(
+            cloud.snapshot.as_deref(),
+            Some("10"),
+            "應停留在前一份完整可用的快照"
+        );
+        assert_eq!(cloud.point_count, 3);
+        assert_eq!(cloud.snapshot_count, 2, "兩份目錄都要算進快照數");
+        assert!(!cloud.is_final);
+
+        // 最新那份寫完之後就會被採用
+        std::fs::write(&images, &full).unwrap();
+        let cloud = load_snapshot_cloud(&root, 1000).expect("應讀到最新快照");
+        assert_eq!(cloud.snapshot.as_deref(), Some("20"));
+        assert_eq!(cloud.point_count, 9);
+
+        // 所有快照都壞掉、但最終模型仍完好 → 退回最終模型（比整個錯誤好）
+        std::fs::write(&images, b"broken").unwrap();
+        let older = snapshots.join("10/images.bin");
+        std::fs::write(&older, b"broken").unwrap();
+        std::fs::create_dir_all(root.join("work/colmap/sparse/0")).unwrap();
+        write_model(&root.join("work/colmap/sparse/0"), &["a.jpg"], 4);
+        let cloud = load_snapshot_cloud(&root, 1000).expect("應退回最終模型");
+        assert!(cloud.is_final);
+        assert_eq!(cloud.snapshot.as_deref(), Some("final"));
+        assert_eq!(cloud.point_count, 4);
+
+        // 快照壞掉、最終模型也沒有 → 這時候才該回錯誤
+        std::fs::remove_dir_all(root.join("work/colmap/sparse/0")).unwrap();
+        assert!(
+            load_snapshot_cloud(&root, 1000).is_err(),
+            "全部候選都失敗時必須回錯誤，而不是假裝成功"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

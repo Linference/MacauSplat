@@ -6,61 +6,198 @@ This product is a derivative work based on OOOSplat
 licensed under the Apache License, Version 2.0.
 
 =====================================================================
+Upstream NOTICE, retained (Apache License 2.0, Sections 4(c) and 4(d))
+=====================================================================
+
+The upstream NOTICE file is reproduced here so that the copyright, patent,
+trademark, and warranty disclaimers of the work this project is derived from
+travel with every copy. It is quoted verbatim:
+
+    OOOSplat
+    Copyright 2026 ooolabdev
+
+    Licensed under the Apache License, Version 2.0.
+
+    This product includes third-party software. See
+    licenses/THIRD_PARTY_NOTICES.txt for attribution and license information.
+
+    The Apache License does not grant permission to use the OOOSplat name, logo,
+    icons, or other brand features as trademarks. See TRADEMARK_POLICY.md.
+
+=====================================================================
 Statement of changes (Apache License 2.0, Section 4(b))
 =====================================================================
 
-The following files were added or modified relative to upstream OOOSplat.
-No upstream functionality was removed.
+Reproduce this list with:
 
-ADDED (this project's contribution — see docs/DESIGN.md):
+    git diff --name-status upstream/main...HEAD
 
-  src-tauri/src/reconstruction/colmap.rs
-      COLMAP sparse-reconstruction reader (cameras.bin / images.bin /
-      points3D.bin) and camera projection mathematics, with unit tests
-      that verify the binary layout by round-trip against synthetic files.
+across the upstream remote https://github.com/ooolabdev/ooosplat.git. The
+categories and notes below mirror that command's output; the file list is
+grouped to keep the upstream logic boundary explicit, and every group carries
+the reason for the change.
 
-  src-tauri/src/reconstruction/inspect.rs
-      Project audit: frame counts, camera registration ratio, camera
-      intrinsics, sparse point statistics, and a readiness check that
-      decides whether a reconstruction can be used for auto-annotation.
+Summary: 77 files modified, 18 files added, 3 files deleted.
 
-  src-tauri/src/reconstruction/autolabel.rs
-      3D bounding-box fitting from the sparse point cloud (with the up
-      axis inferred from the camera trajectory), projection of that box
-      into every registered frame, per-frame quality checks, YOLO label
-      export, CSV/JSON reports and a dependency-free HTML review sheet.
+--- REMOVED (upstream brand assets) ---------------------------------------
 
-  docs/DESIGN.md, docs/COMPLIANCE.md
-      Design rationale and licensing/originality statement.
+D   assets/app-icon.svg
+D   assets/app-icon-rounded.svg
+D   assets/readme-logo.svg
 
-MODIFIED (product identity and CLI surface only; no upstream logic changed):
+    Removed, not merely replaced: these are upstream brand assets, and the
+    Apache License does not grant permission to use them as marks (Section 6).
+    No upstream functionality is affected — they are documentation and icon
+    source files, not code. The replacements are this project's own assets:
 
-  package.json                 name: "ooo-splat"  -> "macausplat"
-  src-tauri/tauri.conf.json    productName/title: "OOOSplat" -> "MacauSplat"
+A   assets/app-icon.png
+A   assets/logo-master-1024.png
+A   assets/logo-white-1024.png
+A   assets/preview-dark.png
+A   assets/preview-light.png
+
+    All application icons under src-tauri/icons/ were regenerated from
+    assets/app-icon.png (Windows, macOS, iOS, and Android icon sets).
+    src-tauri/icons/ is therefore listed as modified below.
+
+--- ADDED (this project's contribution — see docs/DESIGN.md) ---------------
+
+Auto-annotation pipeline (Rust):
+
+A   src-tauri/src/reconstruction/colmap.rs
+        COLMAP sparse-reconstruction reader (cameras.bin / images.bin /
+        points3D.bin) and camera projection mathematics, with unit tests
+        that verify the binary layout by round-trip against synthetic files.
+A   src-tauri/src/reconstruction/inspect.rs
+        Project audit: frame counts, camera registration ratio, camera
+        intrinsics, sparse point statistics, and a readiness check that
+        decides whether a reconstruction can be used for auto-annotation.
+A   src-tauri/src/reconstruction/autolabel.rs
+        3D bounding-box fitting from the sparse point cloud (with the up
+        axis inferred from the camera trajectory), projection of that box
+        into every registered frame, per-frame quality checks, YOLO label
+        export, CSV/JSON reports and a dependency-free HTML review sheet.
+A   src-tauri/src/reconstruction/cloud.rs
+        Sparse point-cloud loading for the in-app live reconstruction
+        viewer, preferring intermediate snapshots and falling back to the
+        published model.
+A   src-tauri/src/pipeline/monitor.rs
+        Live monitoring of the reconstruction stage feeding the point-cloud
+        viewer.
+
+Frontend (added):
+
+A   src/components/PointCloud/PointCloudViewer.tsx
+A   src/components/PointCloud/projection.ts
+A   src/components/PointCloud/projection.test.ts
+A   src/components/PointCloud/index.ts
+        In-app live 3D point-cloud view reached from the mapping stage,
+        with its own projection tests.
+
+Documentation and compliance (added):
+
+A   docs/DESIGN.md
+        Design rationale for the post-reconstruction annotation stage.
+A   docs/COMPLIANCE.md
+        Licensing, originality, and competition disclosure statement.
+
+Build, packaging, and CI (added):
+
+A   scripts/stage-cli.mjs
+        Stages the splatstudio CLI into Tauri's bundle.externalBin location,
+        which is required before any `tauri build`.
+A   scripts/join-installer-parts.ps1
+        Reassembles and SHA-256-verifies the chunked Windows installer.
+
+See "MODIFIED (build, packaging, and CI)" below for the workflow files and
+the other scripts that changed as part of this work.
+
+--- MODIFIED ---------------------------------------------------------------
+
+Product identity:
+
+M   package.json               name "ooo-splat" -> "macausplat"; author and
+                               repository now identify this project, with the
+                               upstream project recorded under `upstream`;
+                               packaging scripts changed (see below)
+M   src-tauri/tauri.conf.json  productName/title "OOOSplat" -> "MacauSplat";
+                               bundle resources extended
                                (identifier "studio.ooo.splat" intentionally
                                 left unchanged so existing settings and the
                                 project index keep working)
-  src-tauri/src/lib.rs         window failure message text
-  src-tauri/src/bin/splatstudio.rs
-                               CLI description text; added three subcommands:
-                               `inspect`, `fit-box`, `annotate`
-  src-tauri/src/reconstruction/mod.rs
-                               registered the three new modules
-  README.md                    added a project banner
-  TRADEMARK_POLICY.md          retained verbatim (upstream document)
+M   index.html                 document title
+M   src/i18n/index.tsx         user-facing product name strings
+M   src/styles.css             presentation updates for this project's screens
+M   src-tauri/src/lib.rs       window failure message text
+M   src-tauri/src/commands/mod.rs
+                               commands for the point-cloud viewer and the
+                               annotation stage
+M   src-tauri/src/pipeline/mod.rs
+                               registered the monitor stage
+M   src-tauri/src/reconstruction/mod.rs
+                               registered the new modules
+M   src-tauri/src/bin/splatstudio.rs
+                               CLI description text; added the `inspect`,
+                               `fit-box`, and `annotate` subcommands, plus
+                               `monitor` and `cloud` for the live view
+M   README.md, README_EN.md    derivative-work banner, artifact names, and CLI
+                               documentation; upstream documentation retained
+                               as a clearly separated reference section
+M   src-tauri/tauri.windows.conf.json, src-tauri/tauri.linux.conf.json,
+    src-tauri/tauri.macos.conf.json
+                               per-platform bundle resources and
+                               beforeBuildCommand aligned with the packaging
+                               scripts
+M   .gitignore                 ignores staged externalBin output
+M   all files under src-tauri/icons/
+                               upstream icons replaced with this project's own
 
-UNCHANGED: the reconstruction pipeline itself (FFmpeg frame extraction,
-COLMAP feature extraction/mapping, Brush training, PLY publishing, Gaussian
-preview, editing, animation export, telemetry).
+Frontend (modified):
+
+M   src/app/App.tsx
+M   src/app/App.preview.test.tsx
+M   src/components/GaussianViewer/GaussianViewer.tsx
+M   src/components/GaussianViewer/GaussianVideoExport.ts
+M   src/lib/backend.ts
+M   src/types/pipeline.ts
+                               exposed the annotation stage in the UI, wired
+                               the point-cloud viewer, and extended the typed
+                               backend surface
+
+Build, packaging, and CI (modified):
+
+M   .github/workflows/ubuntu.yml
+M   .github/workflows/macos.yml
+                               artifact names changed to MacauSplat, engine
+                               setup/verification and CLI staging steps fixed,
+                               caching corrected
+
+Rust pipeline internals (modified):
+
+M   src-tauri/src/engines/brush.rs
+M   src-tauri/src/engines/colmap.rs
+                               option handling needed by the annotation stage
+
+--- UNCHANGED -------------------------------------------------------------
+
+The upstream reconstruction pipeline itself is unchanged: FFmpeg frame
+extraction, COLMAP feature extraction and mapping, Brush training, PLY
+publishing, Gaussian preview and editing, animation export, and telemetry.
+TRADEMARK_POLICY.md and GENERATED_OUTPUTS.md are retained verbatim as
+upstream documents.
 
 =====================================================================
 Third-party software
 =====================================================================
 
 This product includes third-party software. See
-licenses/THIRD_PARTY_NOTICES.txt for attribution and license information.
+licenses/THIRD_PARTY_NOTICES.txt for attribution and license information, and
+licenses/FFmpeg-CORRESPONDING-SOURCE.txt for the written offer of the
+corresponding source code for the bundled LGPL FFmpeg build.
 
 The Apache License does not grant permission to use the OOOSplat name, logo,
 icons, or other brand features as trademarks. This derivative work therefore
-does not use them; it is distributed under the name "MacauSplat" and claims no
-affiliation with, or endorsement by, ooolabdev.
+does not use them: the upstream brand asset files listed under "REMOVED"
+above were deleted, no distributed artifact is named after the upstream
+project, and this work is distributed under the name "MacauSplat". It claims
+no affiliation with, or endorsement by, ooolabdev.

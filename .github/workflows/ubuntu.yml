@@ -8,16 +8,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ubuntu-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-and-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
@@ -54,11 +58,21 @@ jobs:
       - name: Verify license metadata and mappings
         run: npm run verify:licenses
 
+      # Linux uses the system ffmpeg/ffprobe/colmap plus the pinned Brush archive.
+      # `npm run setup:engines` / `verify:engines` dispatch to the *macOS* bash
+      # scripts on darwin/linux alike (see scripts/engine-command.mjs) and those
+      # hard-fail off Apple Silicon, so the Linux variants must be called
+      # explicitly here.
       - name: Install and verify bundled Brush
         run: |
-          npm run setup:engines
-          npm run verify:engines
+          npm run setup:engines:linux
+          npm run verify:engines:linux
 
+      # REQUIRED before `tauri build`: bundle.externalBin declares
+      # binaries/splatstudio, tauri-build fails hard when the staged CLI is
+      # missing, and the file is gitignored. Keep this before the Rust/build
+      # steps. Note that tauri.conf.json's beforeBuildCommand is
+      # `npm run build:bundle:linux`, which does NOT stage the CLI.
       - name: Stage CLI for externalBin
         run: npm run stage:cli
 
@@ -100,21 +114,24 @@ jobs:
           test -n "$(find "$extracted" -type f -name ooo-splat -perm -111 -print -quit)"
           test -n "$(find "$extracted" -type f -path '*/engines/linux/brush/brush_app' -perm -111 -print -quit)"
           test -n "$(find "$extracted" -type f -path '*/engines/manifest.linux.json' -print -quit)"
+          # bundle.externalBin declares binaries/splatstudio, so the staged CLI
+          # must actually land inside the deb next to the main executable.
+          test -n "$(find "$extracted" -type f -name splatstudio -perm -111 -print -quit)"
           dpkg-deb --info "$package"
 
       - name: Package downloadable files
         run: |
           package="$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)"
           version="${{ steps.package.outputs.version }}"
-          filename="OOOSplat-${version}-x64-linux.deb"
+          filename="MacauSplat-${version}-x64-linux.deb"
           mkdir -p dist-artifacts
           cp "$package" "dist-artifacts/$filename"
           (cd dist-artifacts && sha256sum "$filename" > SHA256SUMS.txt)
 
       - name: Upload Ubuntu installer
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: OOOSplat-${{ steps.package.outputs.version }}-x64-linux
+          name: MacauSplat-${{ steps.package.outputs.version }}-x64-linux
           path: dist-artifacts/
           if-no-files-found: error
           retention-days: 14

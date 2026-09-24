@@ -34,8 +34,19 @@ export const clampElevation = (elevation: number): number => {
   return Math.max(-limit, Math.min(limit, elevation));
 };
 
-/** 由包圍盒取得建議的相機（自動取景：讓整個點雲落在視野內）。 */
-export function fitCamera(bounds: Bounds, fov = (50 * Math.PI) / 180): OrbitCamera {
+/**
+ * 由包圍盒取得建議的相機（自動取景：讓整個點雲落在視野內）。
+ *
+ * `fov` 是**垂直**視野，而 `projectPoints` 的水平視野由 aspect 決定
+ * （水平半角 = atan(tan(fov/2) × width/height)）。
+ * 直向視窗（aspect < 1）的水平視野比垂直視野窄，若只用垂直視野推距離，
+ * 左右兩側會被裁掉，因此取兩者中較窄的視野半角來推距離。
+ */
+export function fitCamera(
+  bounds: Bounds,
+  fov = (50 * Math.PI) / 180,
+  aspect = 1,
+): OrbitCamera {
   const center: Vec3 = [
     (bounds.min[0] + bounds.max[0]) / 2,
     (bounds.min[1] + bounds.max[1]) / 2,
@@ -49,7 +60,9 @@ export function fitCamera(bounds: Bounds, fov = (50 * Math.PI) / 180): OrbitCame
   );
   // 球體半徑 → 需要的距離（留 1.35 倍餘裕，避免貼邊）
   const radius = size * 0.866;
-  const distance = (radius / Math.sin(fov / 2)) * 1.35;
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+  const halfAngle = Math.atan(Math.tan(fov / 2) * Math.min(1, safeAspect));
+  const distance = (radius / Math.sin(halfAngle)) * 1.35;
   return { azimuth: Math.PI * 0.25, elevation: Math.PI * 0.18, distance, target: center, fov };
 }
 
@@ -64,22 +77,24 @@ export function cameraPosition(camera: OrbitCamera): Vec3 {
 }
 
 export interface ProjectedPoints {
-  /** 螢幕座標（交錯 xy；長度 = 2 × 點數）。 */
+  /**
+   * 螢幕座標（交錯 xy；長度 = 2 × 點數）。
+   * 深度不足（在相機後方或太靠近近平面）的點為 `[-1, -1]`；
+   * 其餘點可能是畫面外的座標，呼叫端必須自行做範圍裁切。
+   */
   screen: Float32Array;
-  /** 每點的相機深度（用於排序與大小衰減）。 */
+  /** 每點的相機深度（用於排序與大小衰減）；`-1` 表示不可見。 */
   depth: Float32Array;
-  /** 落在畫面內、可繪製的點數。 */
-  visible: number;
 }
 
 /**
  * 把世界座標的點投影到螢幕。
  *
  * 以「相機位於球面上、看向 target」建立視座標系，再做透視除法。
- * 深度 ≤ 近平面（0.01 倍距離）的點會被標記為不可見（depth = -1）。
+ * 深度 ≤ 近平面（0.01 倍距離）的點會被標記為不可見（depth = -1、screen = [-1, -1]）。
  */
 export function projectPoints(
-  positions: Float32Array,
+  positions: ArrayLike<number>,
   camera: OrbitCamera,
   width: number,
   height: number,
@@ -104,7 +119,6 @@ export function projectPoints(
 
   const focal = height / (2 * Math.tan(camera.fov / 2));
   const near = camera.distance * 0.01;
-  let visible = 0;
 
   for (let i = 0; i < count; i += 1) {
     const dx = positions[i * 3] - eye[0];
@@ -119,18 +133,18 @@ export function projectPoints(
     }
     const x = dx * right[0] + dy * right[1] + dz * right[2];
     const y = dx * up[0] + dy * up[1] + dz * up[2];
-    const sx = width / 2 + (x * focal) / z;
-    const sy = height / 2 - (y * focal) / z;
-    screen[i * 2] = sx;
-    screen[i * 2 + 1] = sy;
+    screen[i * 2] = width / 2 + (x * focal) / z;
+    screen[i * 2 + 1] = height / 2 - (y * focal) / z;
     depth[i] = z;
-    if (sx >= 0 && sx < width && sy >= 0 && sy < height) visible += 1;
   }
-  return { screen, depth, visible };
+  return { screen, depth };
 }
 
-/** 由相機中心點計算包圍盒（供相機軌跡顯示用）。 */
-export function boundsOf(positions: Float32Array): Bounds {
+/**
+ * 由相機中心點計算包圍盒（供相機軌跡顯示用）。
+ * 接受任何 `ArrayLike<number>`，呼叫端不必先複製成 `Float32Array`。
+ */
+export function boundsOf(positions: ArrayLike<number>): Bounds {
   if (positions.length === 0) {
     return { min: [0, 0, 0], max: [0, 0, 0] };
   }
@@ -144,6 +158,58 @@ export function boundsOf(positions: Float32Array): Bounds {
     }
   }
   return { min, max };
+}
+
+/**
+ * 由一連串二維點算出像素髒矩形（含 `margin` 邊距，涵蓋相機方點的半寬）。
+ *
+ * 只回寫「真的有畫到」的區域，避免每幀對整個畫布 `putImageData`。
+ * 沒有任何有限值時回傳 `null`（呼叫端據此跳過回寫）。
+ */
+export function elementBounds(
+  screen: Float32Array,
+  depth: Float32Array,
+  width: number,
+  height: number,
+  margin = 0,
+): { x0: number; y0: number; x1: number; y1: number } | null {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  const count = Math.min(Math.floor(screen.length / 2), depth.length);
+  for (let i = 0; i < count; i += 1) {
+    if (depth[i] < 0) continue;
+    const sx = screen[i * 2];
+    const sy = screen[i * 2 + 1];
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+    if (sx < x0) x0 = sx;
+    if (sx > x1) x1 = sx;
+    if (sy < y0) y0 = sy;
+    if (sy > y1) y1 = sy;
+  }
+  if (x0 > x1 || y0 > y1) return null;
+  // 夾在畫布內：超出畫布的部分不需要回寫
+  const clampedX0 = Math.max(0, Math.floor(x0 - margin));
+  const clampedY0 = Math.max(0, Math.floor(y0 - margin));
+  const clampedX1 = Math.min(width - 1, Math.ceil(x1 + margin));
+  const clampedY1 = Math.min(height - 1, Math.ceil(y1 + margin));
+  if (clampedX1 < clampedX0 || clampedY1 < clampedY0) return null;
+  return { x0: clampedX0, y0: clampedY0, x1: clampedX1, y1: clampedY1 };
+}
+
+/**
+ * 從 `start` 往 `step` 方向找出第一個投影有效的索引（用於相機軌跡的首尾標記）。
+ *
+ * 相機在畫面外的座標仍然有效（只是被裁掉），指標必須停在序列兩端；
+ * 只有投影到相機後方（`NaN`）的項目才需要跳過。
+ */
+export function visibleIndex(screen: Float32Array, start: number, step: number): number {
+  const count = Math.floor(screen.length / 2);
+  for (let i = start; i >= 0 && i < count; i += step) {
+    if (Number.isFinite(screen[i * 2]) && Number.isFinite(screen[i * 2 + 1])) return i;
+  }
+  return -1;
 }
 
 /** 合併兩個包圍盒（點雲 + 相機軌跡一起取景）。 */

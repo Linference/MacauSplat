@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, Crosshair, FileBox, Images, Tags,
   Download, Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
@@ -42,6 +42,41 @@ const withTimeout = <T,>(operation: Promise<T>, timeoutMs: number, timeoutMessag
     (error) => { window.clearTimeout(timer); reject(error); },
   );
 });
+
+/**
+ * 模組層級元件的錯誤邊界。
+ *
+ * 為什麼需要：`PointCloudViewer` 經由 `lazy()` 載入，一旦繪製或資料處理拋錯，
+ * React 會卸載整棵樹（React 19 不再印出警告），使用者只看到空白頁。
+ * 這裡把錯誤收斂成一段可讀訊息，維持專案既有的錯誤呈現風格。
+ *
+ * 註：`PointCloudViewer` 自己的測試已涵蓋形狀不合格等實際會拋錯的路徑；
+ * 這個邊界是最後一道保險，不以測試直接觸發它（那需要在同一份模組圖裡
+ * 換掉 lazy 目標，會讓 React/store 出現兩份實例，測到的東西已經不是正式路徑）。
+ */
+class ErrorBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error("Point cloud viewer crashed", error);
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+/** 點雲檢視器崩潰時的替代畫面（與 lazy 載入中的 fallback 同一組樣式）。 */
+function PointCloudFallback() {
+  const { t } = useI18n();
+  return <section className="preview-pane active preview-workspace">
+    <div className="preview-empty" role="alert"><CircleAlert size={24} /><strong>{t("error.generic")}</strong></div>
+  </section>;
+}
 
 const inferFailureDialog = (error: unknown, fallbackStage?: string, fallbackProjectId?: string): FailureDialogState | null => {
   const structured = pipelineCommandError(error);
@@ -223,6 +258,8 @@ export function App() {
   const activePreviewSession = useRef<{ projectId: string; sessionId: number } | null>(null);
   const previewCloseWatchdog = useRef<number | null>(null);
   const pipelineCommandPending = useRef(false);
+  /** 自動標註的同步守衛（state 版本要下次 render 才生效，擋不住連點）。 */
+  const annotationPending = useRef(false);
   const runStartedAt = useRef<number | null>(null);
   const runElapsedOffset = useRef(0);
   const cancellationOverlayTimer = useRef<number | null>(null);
@@ -235,8 +272,11 @@ export function App() {
   const [viewMode, setViewMode] = useState<"tasks" | "preview">("tasks");
   /** 建圖點雲檢視：null 表示關閉；live 表示是否持續輪詢快照。 */
   const [cloudTarget, setCloudTarget] = useState<{ path: string; live: boolean } | null>(null);
-  /** 自動標註：結果摘要與進行中狀態。 */
-  const [annotation, setAnnotation] = useState<AnnotationOutcome | null>(null);
+  /**
+   * 自動標註：結果摘要與進行中狀態。
+   * 摘要必須記住它屬於哪個專案，否則切換專案後完成卡會顯示上一個專案的數字與舊連結。
+   */
+  const [annotation, setAnnotation] = useState<{ projectPath: string; outcome: AnnotationOutcome } | null>(null);
   const [annotationError, setAnnotationError] = useState<string | null>(null);
   const [annotating, setAnnotating] = useState(false);
   const [openingPreviewProjectId, setOpeningPreviewProjectId] = useState<string | null>(null);
@@ -252,6 +292,8 @@ export function App() {
   const [telemetryBusy, setTelemetryBusy] = useState(false);
   const [inputMenuOpen, setInputMenuOpen] = useState(false);
   const missingEngines = store.engines.filter((engine) => !engineReady(engine));
+  // 標註摘要只在「產生它的專案」仍是目前結果時顯示（切換專案後不顯示舊摘要與舊 qa.html）
+  const matchingAnnotation = annotation && annotation.projectPath === store.result?.projectPath ? annotation : null;
   const completed = useMemo(() => store.projects.filter((project) => project.status === "completed"), [store.projects]);
   const unfinished = useMemo(() => store.projects.filter((project) => project.status !== "completed"), [store.projects]);
   const progressEvent = useMemo(() => {
@@ -737,20 +779,31 @@ export function App() {
     setCloudTarget({ path: projectPath, live });
   }, []);
 
-  /** 對已完成的專案執行自動標註（擬合包圍盒 → 投影 → 輸出 YOLO 標籤）。 */
+  /**
+   * 對已完成的專案執行自動標註（擬合包圍盒 → 投影 → 輸出 YOLO 標籤）。
+   *
+   * 守衛用 ref 而不是 state：`annotating` 的閉包值要下一次 render 才更新，
+   * 連點兩下會送出兩個命令，而 Rust 端兩次都寫同一個 `<專案>/annotation/`，
+   * 標籤檔會交錯。ref 是同步的，第二次點擊直接返回。
+   */
   const runAnnotation = useCallback(async () => {
     const projectPath = store.result?.projectPath;
-    if (!projectPath || annotating) return;
+    if (!projectPath || annotationPending.current) return;
+    annotationPending.current = true;
     setAnnotating(true);
     setAnnotationError(null);
     try {
-      setAnnotation(await annotateProject(projectPath, 0));
+      const outcome = await annotateProject(projectPath, 0);
+      setAnnotation({ projectPath, outcome });
     } catch (cause) {
+      // 失敗時清掉舊結果：不同專案的舊摘要比沒有摘要更容易誤導
+      setAnnotation(null);
       setAnnotationError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      annotationPending.current = false;
       setAnnotating(false);
     }
-  }, [annotating, store.result?.projectPath]);
+  }, [store.result?.projectPath]);
 
   useEffect(() => () => {
     const active = activePreviewSession.current;
@@ -770,9 +823,11 @@ export function App() {
   // 建圖點雲檢視：與預覽同一種全螢幕模式，但顯示的是 COLMAP 的稀疏點雲與相機軌跡
   if (cloudTarget) {
     return <main className="app-shell preview-mode">
-      <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("pointcloud.loading")}</strong></div></section>}>
-        <PointCloudViewer projectPath={cloudTarget.path} live={cloudTarget.live} onExit={() => setCloudTarget(null)} />
-      </Suspense>
+      <ErrorBoundary key={`${cloudTarget.path}|${cloudTarget.live}`} fallback={<PointCloudFallback />}>
+        <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("pointcloud.loading")}</strong></div></section>}>
+          <PointCloudViewer projectPath={cloudTarget.path} live={cloudTarget.live} onExit={() => setCloudTarget(null)} />
+        </Suspense>
+      </ErrorBoundary>
     </main>;
   }
 
@@ -900,20 +955,20 @@ export function App() {
             <button type="button" onClick={() => void exportCompletedResult()}><Download size={14} />{t("result.export")}</button>
             <button type="button" onClick={() => void revealCompletedResult()}><FolderOpen size={14} />{t("result.reveal")}</button>
           </div>
-          {(annotation || annotationError) && <div className="annotation-result" role="status">
+          {(matchingAnnotation || annotationError) && <div className="annotation-result" role="status">
             {annotationError && <p className="annotation-error">{t("annotation.failed", { detail: annotationError })}</p>}
-            {annotation && <>
+            {matchingAnnotation && <>
               <strong>{t("annotation.title")}</strong>
               <p>{t("annotation.summary", {
-                accepted: formatNumber(annotation.framesAccepted),
-                total: formatNumber(annotation.framesTotal),
-                ratio: `${(annotation.acceptanceRatio * 100).toFixed(1)}%`,
-                size: annotation.boxSize.map((value) => value.toFixed(2)).join(" × ") + " m",
+                accepted: formatNumber(matchingAnnotation.outcome.framesAccepted),
+                total: formatNumber(matchingAnnotation.outcome.framesTotal),
+                ratio: `${(matchingAnnotation.outcome.acceptanceRatio * 100).toFixed(1)}%`,
+                size: matchingAnnotation.outcome.boxSize.map((value) => value.toFixed(2)).join(" × ") + " m",
               })}</p>
-              <p>{t("annotation.labels", { count: formatNumber(annotation.labelsWritten) })}</p>
-              {annotation.upAxisEstimated && <p className="annotation-warning">{t("annotation.upEstimated")}</p>}
+              <p>{t("annotation.labels", { count: formatNumber(matchingAnnotation.outcome.labelsWritten) })}</p>
+              {matchingAnnotation.outcome.upAxisEstimated && <p className="annotation-warning">{t("annotation.upEstimated")}</p>}
               <div className="completion-result-actions">
-                <button type="button" onClick={() => void revealFile(annotation.qaHtml)}><FolderOpen size={14} />{t("annotation.openFolder")}</button>
+                <button type="button" onClick={() => void revealFile(matchingAnnotation.outcome.qaHtml)}><FolderOpen size={14} />{t("annotation.openFolder")}</button>
               </div>
               <p className="annotation-hint">{t("annotation.qaHint")}</p>
             </>}

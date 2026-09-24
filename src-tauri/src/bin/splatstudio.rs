@@ -67,8 +67,12 @@ enum Commands {
         project: PathBuf,
         #[arg(long, default_value = ".")]
         out: PathBuf,
-        /// Percentile trim per axis (0.02 keeps the 2%..98% range).
-        #[arg(long, default_value_t = 0.02)]
+        /// Percentile trim per axis (0.02 keeps the 2%..98% range, max 0.2).
+        ///
+        /// The range is enforced **here and only here**: `fit_box_from_xyz` no longer
+        /// clamps the value, because a silent clamp made `--trim 0.9` mean the same
+        /// thing as `--trim 0.2` while looking like it had an effect.
+        #[arg(long, default_value_t = 0.02, value_parser = parse_trim)]
         trim: f64,
         /// Use the world Y axis as "up" instead of inferring it from the trajectory.
         #[arg(long)]
@@ -136,6 +140,28 @@ enum Commands {
         #[arg(long)]
         ply: Option<PathBuf>,
     },
+}
+
+/// `--trim` 的驗證（**唯一的驗證點**）：只接受 0.0..=0.2。
+///
+/// 為什麼要自己做而不用 `clap` 的 `.range()`：`clap` 的範圍建構器只支援整數型別
+/// （`RangedI64ValueParser`／`RangedU64ValueParser`），`--trim` 是比例值。
+/// 用 `value_parser` 自訂函式一樣是把驗證放在命令列層——超出範圍會直接被擋下並回報，
+/// 而不是像舊版那樣被 `fit_box_from_xyz` 裡的 `clamp(0.0, 0.2)` 悄悄吞掉，
+/// 讓 `--trim 0.9` 與 `--trim 0.2` 同義（使用者以為自己調了參數卻毫無效果）。
+fn parse_trim(raw: &str) -> std::result::Result<f64, String> {
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("--trim 需要一個數字（0.0..=0.2），收到 {raw:?}"))?;
+    if !value.is_finite() {
+        return Err(format!("--trim 必須是有限數字，收到 {raw:?}"));
+    }
+    if !(0.0..=0.2).contains(&value) {
+        return Err(format!(
+            "--trim 必須介於 0.0 與 0.2 之間（收到 {value}）；0.02 代表各軸取 2%~98% 範圍"
+        ));
+    }
+    Ok(value)
 }
 
 #[tokio::main]
@@ -284,29 +310,27 @@ async fn execute(cli: Cli) -> Result<()> {
                 infer_up: !no_infer_up,
                 ..FitOptions::default()
             };
-            let box3d = fit_box_from_points(&reconstruction, &options).ok_or_else(|| {
-                SplatError::Process(
-                    "點雲不足，無法自動擬合包圍盒（可用 --no-infer-up 或人工指定）".into(),
-                )
-            })?;
+            let box3d = fit_box_from_points(&reconstruction, &options)
+                .map_err(|e| SplatError::Process(format!("自動擬合包圍盒失敗：{e}")))?;
             std::fs::create_dir_all(&out)?;
             let path = out.join("box.json");
             std::fs::write(&path, serde_json::to_string_pretty(&box3d)?)?;
             println!(
-                "包圍盒：{:.2} × {:.2} × {:.2} m，中心 [{:.2}, {:.2}, {:.2}]，上軸{}，取自 {} 個點",
+                "包圍盒：{:.2} × {:.2} × {:.2} m，中心 [{:.2}, {:.2}, {:.2}]，上軸：{}，取自 {} 個點",
                 box3d.size[0],
                 box3d.size[1],
                 box3d.size[2],
                 box3d.center[0],
                 box3d.center[1],
                 box3d.center[2],
-                if box3d.up_axis_estimated {
-                    "為推定值（軌跡退化）"
-                } else {
-                    "由相機軌跡推定"
-                },
+                box3d.up_source.label(),
                 box3d.fitted_from_points
             );
+            if box3d.up_source.is_estimated() {
+                println!(
+                    "⚠ 上軸是後備值（世界 Y 軸），建築高度可能不準；請用 qa.html 人工複核框位"
+                );
+            }
             println!("已寫入 {}", path.display());
         }
         Commands::Annotate {
@@ -324,6 +348,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 write_yolo_labels, AnnotateOptions, Box3D,
             };
             use ooo_splat::reconstruction::colmap::SparseReconstruction;
+            use ooo_splat::reconstruction::inspect;
 
             let reconstruction = SparseReconstruction::load(project.join("work/colmap"))
                 .or_else(|_| SparseReconstruction::load(&project))
@@ -337,19 +362,23 @@ async fn execute(cli: Cli) -> Result<()> {
                 ..AnnotateOptions::default()
             };
             let annotations = annotate_reconstruction(&reconstruction, &box3d, &options);
-            let summary = summarize(&annotations);
+            let mut summary = summarize(&annotations);
             std::fs::create_dir_all(&out)?;
             let labels_dir = out.join("labels");
-            let written = write_yolo_labels(&labels_dir, &annotations, class_id)?;
+            let labels = write_yolo_labels(&labels_dir, &annotations, class_id)?;
+            summary.labels_removed = labels.removed;
             std::fs::write(
                 out.join("annotations.json"),
                 serde_json::to_string_pretty(&annotations)?,
             )?;
             write_annotations_csv(out.join("annotations.csv"), &annotations)?;
-            // QA 表以 out/ 為基準指向影格目錄
+            // QA 表以 out/ 為基準指向影格目錄：用實際存在的那一個（三個候選之一），
+            // 不可以寫死 ../work/frames
+            let frames_href = inspect::frames_href(&project, &out)
+                .unwrap_or_else(|| inspect::FALLBACK_FRAMES_HREF.to_string());
             write_qa_html(
                 out.join("qa.html"),
-                "../work/frames",
+                &frames_href,
                 &annotations,
                 &summary,
                 &box3d,
@@ -360,14 +389,27 @@ async fn execute(cli: Cli) -> Result<()> {
                 summary.frames_total,
                 summary.frames_accepted,
                 summary.acceptance_ratio * 100.0,
-                written
+                labels.written
             );
+            if labels.removed > 0 {
+                println!(
+                    "（重跑：已清掉上一輪的 {} 個舊標籤，避免不再採用的影格留下錯誤正樣本）",
+                    labels.removed
+                );
+            }
             if !summary.rejection_reasons.is_empty() {
                 println!("主要略過原因：");
                 for (reason, n) in summary.rejection_reasons.iter().take(5) {
                     println!("  {n:4} 張：{reason}");
                 }
             }
+            if !summary.warnings.is_empty() {
+                println!("警示（仍會寫出標籤，但請人工複核）：");
+                for (message, n) in summary.warnings.iter().take(5) {
+                    println!("  {n:4} 張：{message}");
+                }
+            }
+            println!("QA 影格連結：{frames_href}");
             println!(
                 "輸出：{}（labels/、annotations.json、annotations.csv、qa.html）",
                 out.display()
@@ -489,5 +531,42 @@ fn ensure_engine(path: &std::path::Path) -> Result<()> {
         Ok(())
     } else {
         Err(SplatError::EngineMissing(path.display().to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--trim` 的驗證必須在命令列層擋下（範圍 0.0..=0.2）。
+    ///
+    /// 舊版沒有任何驗證，而 `fit_box_from_xyz` 又會 `clamp(0.0, 0.2)`：
+    /// 於是 `--trim 0.9` 與 `--trim 0.2` 完全同義，使用者以為參數生效了卻毫無差別。
+    /// 現在超範圍會直接讓命令列解析失敗（而不是被悄悄改掉）。
+    #[test]
+    fn trim_argument_rejects_values_outside_the_supported_range() {
+        assert_eq!(parse_trim("0.02").unwrap(), 0.02);
+        assert_eq!(parse_trim("0").unwrap(), 0.0);
+        assert_eq!(parse_trim("0.2").unwrap(), 0.2);
+        for invalid in ["0.9", "-0.1", "0.200001", "abc", "", "NaN", "inf"] {
+            let error = parse_trim(invalid).expect_err("這個值不該被接受");
+            assert!(!error.is_empty(), "錯誤訊息不可為空");
+        }
+    }
+
+    /// 經由真正的 `clap` 解析路徑驗證：超範圍的 `--trim` 會被擋下，合法值可以通過。
+    #[test]
+    fn cli_parse_blocks_an_out_of_range_trim() {
+        let ok = Cli::try_parse_from(["splatstudio", "fit-box", "C:/project", "--trim", "0.2"]);
+        assert!(ok.is_ok(), "0.2 應該被接受：{ok:?}");
+
+        let refused =
+            Cli::try_parse_from(["splatstudio", "fit-box", "C:/project", "--trim", "0.9"]);
+        let error = refused.expect_err("0.9 必須被命令列擋下");
+        let message = error.to_string();
+        assert!(
+            message.contains("--trim"),
+            "錯誤訊息應指出是哪個參數：{message}"
+        );
     }
 }

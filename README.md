@@ -56,7 +56,8 @@ splatstudio annotate "<專案目錄>" --box-path out/box.json --class-id 0 --out
 3. **遮擋用既有資料判斷**——用 COLMAP 的 track 反查「有多少盒內三維點被這張影格觀測到」，
    不需要額外的深度圖或語意分割。
 
-目前狀態：23 項單元測試（解析往返、投影幾何、上軸推定、包圍盒擬合、離群修剪、品質判斷、標籤輸出），
+目前狀態：159 項單元測試（解析往返、投影幾何、上軸推定、包圍盒擬合、離群修剪、品質判斷、標籤輸出；
+其中 44 項位於 `reconstruction` 模組，含 `autolabel` 13 項、`colmap` 6 項、`inspect` 5 項、`cloud` 5 項），
 並以 8 個真實 OOOSplat 專案端到端驗證（其中 3 個因註冊率過低被正確判為不可用）。
 
 ---
@@ -65,12 +66,13 @@ splatstudio annotate "<專案目錄>" --box-path out/box.json --class-id 0 --out
 
 [中文](README.md) | [English](README_EN.md)
 
-<p align="center">
-  <img src="assets/logo-master-1024.png" alt="OOOSplat Logo" width="180">
-</p>
+> **上游原始文件（僅供對照）**
+> 本節以下的內容是上游專案 OOOSplat 的原始說明文件，保留作為重建流程的技術對照。
+> 它描述的是上游產品，不是 MacauSplat 的發行說明；兩者的安裝包名稱與下載位置不同。
+> 上游專案：<https://github.com/ooolabdev/ooosplat>（Apache-2.0，作者 ooolabdev）
 
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>⬇️ 下载 OOOSplat 0.4.1（Windows / macOS / Ubuntu）</strong></a>
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>上游 OOOSplat 0.4.1 发行版（非本專案）</strong></a>
 </p>
 
 OOOSplat 是一款将普通环绕拍摄视频或图片序列一键转换为 3D Gaussian Splatting 的本地桌面应用。选择素材、项目目录和质量档位后，应用会自动完成画面准备、相机重建、训练与 PLY 发布，并可直接预览、调整和导出结果。
@@ -194,18 +196,18 @@ sudo apt install -y \
 
 请为显卡安装可用的 Vulkan 驱动（例如 NVIDIA 专有驱动，或 AMD/Intel 的 Mesa 驱动）。Ubuntu 24.04 仓库中的无 CUDA COLMAP 构建会自动使用 CPU；Brush 会在运行时选择可用的图形后端。完全 CPU-only 的软件 Vulkan 后端尚未完成端到端验证。
 
-从 GitHub Actions 下载 `OOOSplat-0.4.1-x64-linux` Artifact 后，可执行：
+从 GitHub Actions 下载 `MacauSplat-0.4.1-x64-linux` Artifact（同目录附 `SHA256SUMS.txt`，可先核对安装包哈希）后，可执行：
 
 ```bash
-sudo apt install ./OOOSplat-0.4.1-x64-linux.deb
+sudo apt install ./MacauSplat-0.4.1-x64-linux.deb
 ```
 
 `.deb` 会通过 Ubuntu 包管理器安装 FFmpeg、FFprobe 和 CPU 版 COLMAP；固定版本 Brush 已包含在安装包中。
 
 ## 安装与使用
 
-1. Windows 运行 `OOOSplat-0.4.1-x64-windows.exe`；Apple Silicon Mac 打开 `OOOSplat-0.4.1-arm64-macos.dmg` 并将 OOOSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./OOOSplat-0.4.1-x64-linux.deb`。
-2. 启动 OOOSplat，确认顶栏中的内置引擎状态正常；可使用右上角的 `EN / 中文` 按钮即时切换界面语言。
+1. Windows 运行 `MacauSplat-0.4.1-x64-windows.exe`；Apple Silicon Mac 打开 `MacauSplat-0.4.1-arm64-macos.dmg` 并将 MacauSplat 拖入“应用程序”；Ubuntu 24.04 使用 `sudo apt install ./MacauSplat-0.4.1-x64-linux.deb`。
+2. 启动 MacauSplat，确认顶栏中的内置引擎状态正常；可使用右上角的 `EN / 中文` 按钮即时切换界面语言。
 3. 在“01 创建新任务”的输入类型下拉栏选择“视频”或“图片”，再点击输入框选择视频文件或图片序列文件夹。
 4. 选择项目根目录；程序会记住上次使用的位置。
 5. 选择“快速”“均衡”或“精细”档位。
@@ -371,21 +373,56 @@ npm run verify:licenses
 
 ### 生成 Windows 安装包
 
+首次构建前必须运行 `npm run setup:engines`（引擎二进制文件不纳入 Git），然后：
+
 ```powershell
 npm run package:windows
 ```
 
+`package:windows` 会依次执行 `verify:telemetry:release`、`stage:cli`、NSIS 构建，最后以
+`node scripts/collect-windows-installer.mjs` 收集成品。其中 `stage:cli` 不可省略：
+Tauri 的构建脚本会断言 `bundle.externalBin` 指向的 `src-tauri/binaries/splatstudio-<triple>.exe`
+必须存在，而该文件是 gitignore 的产物，未先 stage 会在 cargo 阶段直接失败（干净 checkout 时尤其明显）。
+
 NSIS 安装包输出到：
 
 ```text
-dist-artifacts\OOOSplat-0.4.1-x64-windows.exe
+dist-artifacts\MacauSplat-0.4.1-x64-windows.exe
 ```
 
-首次构建前必须运行 `npm run setup:engines`。`beforeBuildCommand` 会自动执行引擎校验和前端生产构建，但不会在打包过程中隐式访问网络。
+`npm run package:linux`（`--bundles deb`）与 `npm run package:macos`（`--bundles app,dmg`）
+与 Windows 流程同构，各自先执行 `stage:cli` 再打包。`beforeBuildCommand` 会自动执行引擎校验和前端生产构建，
+但不会在打包过程中隐式访问网络。
 
 ## CLI
 
-仓库同时提供 `splatstudio` 诊断 CLI：
+仓库同时提供 `splatstudio` 诊断 CLI。安装包用户与源码构建者都能使用：安装包会把 CLI 与主程序并列安装，
+不需要 Rust 工具链或源码；只有从源码开发时才需要下面的 `cargo run` 形式。
+
+### 已安装版本内置的 CLI（免源码）
+
+Windows NSIS 安装包会把 `splatstudio.exe` 放在**主程序可执行文件旁边**，也就是与 `MacauSplat.exe` 相同的安装目录。
+因此安装完成后 CLI 已可直接使用，不需要 Rust 工具链，也不需要 clone 源码。Ubuntu 的 `.deb` 与 macOS 的 `.dmg`
+同样把 `splatstudio` 与主程序一起打包。
+
+```powershell
+# 安装后 CLI 与主程序并列（默认安装目录）
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" health
+
+# 检查一个现有项目是否具备自动标注条件
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" inspect "D:\Splats\MyProject"
+
+# 由稀疏点云拟合三维包围盒，再投影成 YOLO 标签
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" fit-box "D:\Splats\MyProject" --out out\
+& "$env:ProgramFiles\MacauSplat\splatstudio.exe" annotate "D:\Splats\MyProject" --box-path out\box.json --class-id 0 --out out\
+```
+
+若 `splatstudio.exe` 不在 `PATH` 中，请以完整路径调用（如上例），或将安装目录加入 `PATH`。
+
+子命令：`health`、`probe`、`plan`、`extract`、`generate`、`inspect`、`fit-box`、`annotate`、`monitor`、`cloud`。
+其中 `inspect`、`fit-box`、`annotate` 是本项目新增的自动标注子命令，其余沿用上游诊断指令。
+
+源码构建（开发者）：
 
 ```powershell
 # 检查所有内置引擎

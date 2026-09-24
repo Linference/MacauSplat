@@ -1386,14 +1386,27 @@ async fn best_sparse_model(
         .map_err(|error| SplatError::Process(format!("稀疏模型校验任务失败：{error}")))?
 }
 
+/// 從 `sparse/` 底下所有候選目錄中挑出「最終」稀疏模型（註冊影格數最多者）。
+///
+/// **必須排除中間快照**：`--Mapper.snapshot_path` 讓 COLMAP 在建圖過程中
+/// 不斷把當下的重建寫進 `sparse/snapshots/<n>/`，而那些目錄就在 `sparse/` 底下。
+/// 若不排除，一個「剛好已經寫完整」的中間快照可能因為影格數較多而勝出，
+/// 被當成最終模型複製進 Brush 的訓練資料集——訓練出來的模型會對應到一個
+/// 還沒收斂的中間狀態，而且完全沒有錯誤訊息。
 fn best_sparse_model_blocking(
     frames: &Path,
     sparse: &Path,
 ) -> Result<(PathBuf, ReconstructionReport)> {
+    let snapshots = sparse.join(colmap::SNAPSHOT_DIRECTORY_NAME);
     let mut best: Option<(PathBuf, ReconstructionReport)> = None;
     for entry in std::fs::read_dir(sparse)? {
         let path = entry?.path();
         if !path.is_dir() {
+            continue;
+        }
+        // 快照目錄本身與其下的任何東西都不是候選（`starts_with` 以路徑元件比較，
+        // 因此不會誤把 `snapshots_old` 這種同前綴的名字一起排除）
+        if path.starts_with(&snapshots) {
             continue;
         }
         if let Ok(report) = ReconstructionValidator::validate(frames, &path) {
@@ -1795,6 +1808,99 @@ mod tests {
     #[test]
     fn brush_estimated_progress_handles_an_invalid_duration() {
         assert_eq!(estimated_brush_progress(10_000, 0), 0.0);
+    }
+
+    /// **關鍵回歸測試**：中間快照不得被當成最終稀疏模型。
+    ///
+    /// 失效鏈：`--Mapper.snapshot_path` 讓 COLMAP 把建圖過程中的每一份重建寫進
+    /// `sparse/snapshots/<n>/`，而那些目錄就在 `best_sparse_model_blocking` 掃描的
+    /// `sparse/` 底下。它取「註冊影格數最多」的候選，而中間快照只要剛好寫完、
+    /// 又比最終模型大，就會勝出並被複製進 Brush 的訓練資料集——
+    /// 訓練於是對應到一個還沒收斂的中間狀態，而且沒有任何錯誤訊息。
+    #[test]
+    fn intermediate_snapshots_are_never_picked_as_the_final_model() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let frames = root.join("frames");
+        let sparse = root.join("colmap/sparse");
+        std::fs::create_dir_all(&frames).unwrap();
+        for i in 0..30 {
+            std::fs::write(frames.join(format!("frame_{i:04}.jpg")), b"x").unwrap();
+        }
+        // 最終模型：註冊 10 張
+        write_sparse_model(&sparse.join("0"), 10, 500);
+        // 中間快照：註冊 25 張（比最終模型「大」，因此會被舊版選中）
+        write_sparse_model(&sparse.join("snapshots/25"), 25, 900);
+        // 連快照根目錄本身也被寫成一份模型（COLMAP 版本／設定不同時可能如此）
+        write_sparse_model(&sparse.join("snapshots"), 27, 950);
+
+        let (best, report) = best_sparse_model_blocking(&frames, &sparse).expect("應找到最終模型");
+        assert_eq!(
+            best,
+            sparse.join("0"),
+            "只有最終模型是候選，快照不得勝出（實際選到 {best:?}）"
+        );
+        assert_eq!(report.registered_images, 10);
+
+        // 名字以 snapshots 開頭但不是快照目錄的兄弟目錄仍要被考慮
+        // （`starts_with` 是路徑元件比較，不是字串前綴）
+        write_sparse_model(&sparse.join("snapshots_old"), 12, 400);
+        let (best, report) = best_sparse_model_blocking(&frames, &sparse).expect("應找到最終模型");
+        assert_eq!(best, sparse.join("snapshots_old"));
+        assert_eq!(report.registered_images, 12);
+
+        // 只剩快照、沒有任何最終模型 → 必須報錯，而不是拿快照充數
+        std::fs::remove_dir_all(sparse.join("0")).unwrap();
+        std::fs::remove_dir_all(sparse.join("snapshots_old")).unwrap();
+        assert!(best_sparse_model_blocking(&frames, &sparse).is_err());
+    }
+
+    /// 寫出一份最小但可通過 `ReconstructionValidator` 的稀疏模型。
+    fn write_sparse_model(dir: &Path, images: u64, points: u64) {
+        use std::io::Write;
+        std::fs::create_dir_all(dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("cameras.bin")).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&0i32.to_le_bytes()).unwrap(); // SIMPLE_PINHOLE
+        f.write_all(&640u64.to_le_bytes()).unwrap();
+        f.write_all(&480u64.to_le_bytes()).unwrap();
+        for v in [500.0f64, 320.0, 240.0] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        drop(f);
+
+        let mut f = std::fs::File::create(dir.join("images.bin")).unwrap();
+        f.write_all(&images.to_le_bytes()).unwrap();
+        for i in 0..images {
+            f.write_all(&((i + 1) as u32).to_le_bytes()).unwrap();
+            for v in [1.0f64, 0.0, 0.0, 0.0] {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+            for v in [0.0f64, 0.0, (i as f64) * 0.5] {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+            f.write_all(&1u32.to_le_bytes()).unwrap();
+            f.write_all(format!("frame_{i:04}.jpg\0").as_bytes())
+                .unwrap();
+            f.write_all(&0u64.to_le_bytes()).unwrap();
+        }
+        drop(f);
+
+        let mut f = std::fs::File::create(dir.join("points3D.bin")).unwrap();
+        f.write_all(&points.to_le_bytes()).unwrap();
+        for i in 0..points {
+            f.write_all(&(i as i64).to_le_bytes()).unwrap();
+            for v in [i as f64, 1.0, 2.0] {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+            f.write_all(&[9u8, 9, 9]).unwrap();
+            f.write_all(&0.1f64.to_le_bytes()).unwrap();
+            f.write_all(&1u64.to_le_bytes()).unwrap();
+            f.write_all(&1u32.to_le_bytes()).unwrap();
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+        }
+        drop(f);
     }
 
     #[test]
