@@ -322,17 +322,47 @@ pub async fn map(
         output.into(),
     ];
     // 中間快照：讓外部監視工具能在建圖過程中看到「點雲正在長大」，而不必等整個重建結束。
-    // 這是 COLMAP 內建選項（--Mapper.snapshot_path / snapshot_images_freq）；
-    // 舊版可能沒有，因此先問 help，不支援就靜默略過，不影響重建本身。
-    if let Some(snapshot_dir) = snapshot_directory(output) {
-        if let Ok(true) =
-            colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path").await
+    //
+    // 這裡有個真實踩過的坑：**選項名稱隨 COLMAP 版本改變**。
+    //   COLMAP 3.x：--Mapper.snapshot_images_freq
+    //   COLMAP 4.x：--Mapper.snapshot_frames_freq（本專案隨附的 4.1.0 用這個）
+    // 傳錯名稱不是「快照功能失效」，而是 **mapper 直接以 exit code 1 結束、整條重建中斷**，
+    // 因此兩個名稱都要探測，且探測失敗必須留下紀錄（不可靜默略過）。
+    let snapshot_dir = snapshot_directory(output);
+    let path_ok = snapshot_dir.is_some()
+        && colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path")
+            .await
+            .unwrap_or(false);
+    let freq_option = if path_ok {
+        if colmap_supports_option(executable, "mapper", "--Mapper.snapshot_frames_freq")
+            .await
+            .unwrap_or(false)
         {
-            let _ = tokio::fs::create_dir_all(&snapshot_dir).await;
+            Some("--Mapper.snapshot_frames_freq")
+        } else if colmap_supports_option(executable, "mapper", "--Mapper.snapshot_images_freq")
+            .await
+            .unwrap_or(false)
+        {
+            Some("--Mapper.snapshot_images_freq")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    match (snapshot_dir, freq_option) {
+        (Some(dir), Some(option)) => {
+            let _ = tokio::fs::create_dir_all(&dir).await;
             args.push("--Mapper.snapshot_path".into());
-            args.push(snapshot_dir.clone().into());
-            args.push("--Mapper.snapshot_images_freq".into());
+            args.push(dir.into());
+            args.push(option.into());
             args.push(OsString::from("10"));
+        }
+        _ => {
+            // 明確記錄，否則使用者只會看到「點雲檢視器永遠沒有內容」而無從得知原因
+            tracing::warn!(
+                "此 COLMAP 不支援 Mapper 中間快照（找不到 snapshot_path 或 snapshot_frames_freq），建圖過程將不產生快照"
+            );
         }
     }
     run_colmap(
