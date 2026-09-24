@@ -387,6 +387,7 @@ const zhCN = {
     "annotation.openFolder": "開啟標註資料夾",
     "annotation.qaHint": "雙擊資料夾內的 qa.html 可人工複核框是否正確",
     "annotation.failed": "自動標註失敗：{detail}",
+    "pointcloud.openLive": "查看建图点云（实时）",
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
@@ -463,6 +464,7 @@ const en: Record<TranslationKey, string> = {
     "annotation.openFolder": "Open annotation folder",
     "annotation.qaHint": "Double-click qa.html inside the folder to review the boxes",
     "annotation.failed": "Auto-annotation failed: {detail}",
+    "pointcloud.openLive": "Watch point cloud (live)",
 
 };
 

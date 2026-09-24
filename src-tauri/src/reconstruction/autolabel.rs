@@ -204,6 +204,18 @@ pub fn fit_box_from_xyz(
     images: &[Image],
     options: &FitOptions,
 ) -> Option<Box3D> {
+    // 先剔除 NaN／Inf。
+    //
+    // 為什麼非在這裡過濾不可：Rust 的 `f64::min` / `f64::max` 會**忽略** NaN（回傳另一個運算元），
+    // 與 Python 相反；`partial_cmp` 對 NaN 也回 None（原本用 `unwrap_or(Equal)` 當作相等）。
+    // 於是單一個 NaN 座標就能讓包圍盒中心變成 NaN，而 size 看起來仍正常——
+    // 接著 `area_ratio > max` 這類比較因 NaN 恆為 false 而攔不住，最後寫出
+    // `0 NaN 0.5 NaN 0.5` 這種 YOLO 標籤，靜默污染整份訓練資料。
+    let points: Vec<[f64; 3]> = points
+        .iter()
+        .copied()
+        .filter(|p| p.iter().all(|v| v.is_finite()))
+        .collect();
     if points.len() < 8 {
         return None;
     }
@@ -418,7 +430,18 @@ pub fn annotate_frame(
     let area_ratio = (bw * bh) / (w * h);
 
     let mut reason = None;
-    if options.require_all_corners && visible < 8 {
+    // 非有限值守門：幾何算完後再檢查一次。前面已過濾點雲中的 NaN，這裡擋的是
+    // 相機參數或包圍盒本身退化的情況——與其寫出壞標籤，不如明確拒絕這張影格。
+    let finite_projection = x0.is_finite()
+        && y0.is_finite()
+        && x1.is_finite()
+        && y1.is_finite()
+        && bw.is_finite()
+        && bh.is_finite()
+        && area_ratio.is_finite();
+    if !finite_projection {
+        reason = Some("投影結果非有限值（點雲或包圍盒含 NaN/Inf）".into());
+    } else if options.require_all_corners && visible < 8 {
         reason = Some(format!(
             "嚴格模式要求 8 個角點全可見，此影格僅 {visible} 個（框可能低估輪廓）"
         ));
@@ -563,6 +586,10 @@ pub fn write_yolo_labels(
     let mut written = 0;
     for a in annotations.iter().filter(|a| a.accepted) {
         let Some(y) = a.yolo else { continue };
+        // 最後一道防線：寧可少一個標籤，也不要把 NaN 寫進訓練資料
+        if !y.iter().all(|v| v.is_finite()) {
+            continue;
+        }
         let stem = Path::new(&a.frame)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -1080,5 +1107,96 @@ mod tests {
             s.frames_total,
             s.rejection_reasons
         );
+    }
+
+    /// **關鍵回歸測試**：點雲中的 NaN 不得污染包圍盒，也不得寫出 NaN 標籤。
+    ///
+    /// 實測過的失效鏈：Rust 的 `f64::min/max` 會忽略 NaN，所以
+    /// 「檢查 min_u.is_finite()」這類守門全失效；單一個 NaN 就讓包圍盒中心變 NaN，
+    /// 而 size 看起來正常，最後寫出 `0 NaN 0.5 NaN 0.5` 這種標籤且沒有任何錯誤訊息。
+    #[test]
+    fn nan_points_never_reach_the_labels() {
+        let mut points: Vec<[f64; 3]> = (0..600)
+            .map(|i| {
+                let t = i as f64 / 599.0;
+                [t * 10.0 - 5.0, t * 4.0 - 2.0, ((i % 11) as f64) * 0.3 - 1.5]
+            })
+            .collect();
+        points.push([f64::NAN, 0.0, 0.0]);
+        points.push([0.0, f64::INFINITY, 0.0]);
+
+        let images: Vec<Image> = (0..8)
+            .map(|i| {
+                let a = i as f64 * std::f64::consts::TAU / 8.0;
+                Image {
+                    id: i + 1,
+                    qvec: [1.0, 0.0, 0.0, 0.0],
+                    tvec: [-12.0 * a.cos(), -1.0, -12.0 * a.sin()],
+                    camera_id: 1,
+                    name: format!("f{i}.jpg"),
+                    points2d: vec![],
+                }
+            })
+            .collect();
+
+        let b = fit_box_from_xyz(&points, &images, &FitOptions::default()).expect("仍應可擬合");
+        assert!(
+            b.center.iter().all(|v| v.is_finite()),
+            "包圍盒中心不得為 NaN/Inf：{:?}",
+            b.center
+        );
+        assert!(
+            b.size.iter().all(|v| v.is_finite() && *v > 0.0),
+            "尺寸無效：{:?}",
+            b.size
+        );
+        for axis in &b.axes {
+            assert!(
+                axis.iter().all(|v| v.is_finite()),
+                "軸向含非有限值：{axis:?}"
+            );
+        }
+
+        // 用這個盒產生標註，任何被採用的框都必須是有限值
+        let image = Image {
+            id: 1,
+            qvec: [1.0, 0.0, 0.0, 0.0],
+            tvec: [0.0, 0.0, 0.0],
+            camera_id: 1,
+            name: "f.jpg".into(),
+            points2d: vec![],
+        };
+        let a = annotate_frame(&image, &camera(), &b, &AnnotateOptions::default(), 100);
+        if let Some(y) = a.yolo {
+            assert!(
+                y.iter().all(|v| v.is_finite()),
+                "YOLO 標籤含非有限值：{y:?}"
+            );
+        }
+
+        // 即使有人手工造出 NaN 標籤，write_yolo_labels 也必須擋下
+        let dir = std::env::temp_dir().join(format!("macausplat-nan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bad = FrameAnnotation {
+            frame: "bad.jpg".into(),
+            yolo: Some([f64::NAN, 0.5, 0.5, 0.5]),
+            pixel: None,
+            visible_corners: 8,
+            area_ratio: 0.2,
+            observed_points: 10,
+            accepted: true,
+            reason: None,
+        };
+        let good = FrameAnnotation {
+            frame: "good.jpg".into(),
+            yolo: Some([0.5, 0.5, 0.2, 0.2]),
+            ..bad.clone()
+        };
+        let n = write_yolo_labels(&dir, &[bad, good], 0).expect("寫入應成功");
+        assert_eq!(n, 1, "NaN 標籤必須被略過");
+        assert!(!dir.join("bad.txt").exists(), "不得產生含 NaN 的標籤檔");
+        let content = std::fs::read_to_string(dir.join("good.txt")).unwrap();
+        assert!(!content.contains("NaN"), "標籤內容不得含 NaN：{content}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

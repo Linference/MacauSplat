@@ -205,6 +205,12 @@ export function App() {
   const loadGaussian = useGaussianTransformStore((state) => state.load);
   const closeGaussian = useGaussianTransformStore((state) => state.close);
   const isRunning = store.phase === "running";
+  // 執行中的專案路徑：PipelineEvent 不帶路徑，只能從專案列表取（建圖階段會出現在列表裡）。
+  // 這是「建圖過程即時點雲」的入口——先前只在完成後的結果卡開放，等於即時檢視永遠用不到。
+  const runningProjectPath = useMemo(
+    () => store.projects.find((item) => item.status === "running")?.projectPath ?? null,
+    [store.projects],
+  );
   const liveLogRef = useRef<HTMLDivElement>(null);
   const followLiveLogRef = useRef(true);
   const workspaceRef = useRef<HTMLElement>(null);
@@ -873,6 +879,7 @@ export function App() {
           <div className="live-log" aria-live="polite" ref={liveLogRef} onScroll={updateLiveLogFollow}>
             {store.events.map((event, index) => <div className={`log-line ${event.level}`} key={`${event.sequence}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString(locale, { hour12: false })}</time><span>{event.engine ?? "system"}</span><p>{event.kind === "log" ? event.message : localizePipelineMessage(locale, event.message)}</p></div>)}
           </div>
+          {isRunning && runningProjectPath && <button className="settings-action" type="button" onClick={() => openCloudViewer(runningProjectPath, true)}><Crosshair size={14} />{t("pointcloud.openLive")}</button>}
           {isRunning && <button className="cancel-action" type="button" disabled={isCancellationRequested} onClick={() => void requestCancellation()}>{isCancellationRequested ? <LoaderCircle className="spin" size={13} /> : <Square size={12} fill="currentColor" />}{isCancellationRequested ? t("progress.terminating") : t("progress.cancel")}</button>}
         </section>}
 
