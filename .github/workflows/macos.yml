@@ -68,6 +68,9 @@ jobs:
       - name: Build and verify bundled arm64 engines
         run: npm run build:engines:macos
 
+      - name: Stage CLI for externalBin
+        run: npm run stage:cli
+
       - name: Rust formatting, tests, and clippy
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

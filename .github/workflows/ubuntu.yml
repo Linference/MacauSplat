@@ -59,6 +59,9 @@ jobs:
           npm run setup:engines
           npm run verify:engines
 
+      - name: Stage CLI for externalBin
+        run: npm run stage:cli
+
       - name: Rust formatting, tests, and clippy
         run: |
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
