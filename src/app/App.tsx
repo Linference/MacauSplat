@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, FileBox, Images,
+  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, Crosshair, FileBox, Images,
   Download, Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
   Languages, Settings2, X, Zap,
 } from "lucide-react";
@@ -23,6 +23,7 @@ import type { EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality } 
 import type { TelemetryPreferences as TelemetryPreferencesState } from "../types/telemetry";
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
+const PointCloudViewer = lazy(() => import("../components/PointCloud").then((module) => ({ default: module.PointCloudViewer })));
 const CANCELLATION_OVERLAY_DELAY_MS = 300;
 const PREVIEW_CLOSE_TIMEOUT_MS = 8_000;
 const NATIVE_ACTION_TIMEOUT_MS = 8_000;
@@ -226,6 +227,8 @@ export function App() {
   const [uiScale, setUiScale] = useState(() => Math.min(140, Math.max(80, readSavedNumber("ooo-splat-ui-scale", 100))));
   const [isResizing, setIsResizing] = useState(false);
   const [viewMode, setViewMode] = useState<"tasks" | "preview">("tasks");
+  /** 建圖點雲檢視：null 表示關閉；live 表示是否持續輪詢快照。 */
+  const [cloudTarget, setCloudTarget] = useState<{ path: string; live: boolean } | null>(null);
   const [openingPreviewProjectId, setOpeningPreviewProjectId] = useState<string | null>(null);
   const [closingPreviewProjectId, setClosingPreviewProjectId] = useState<string | null>(null);
   const [previewSessionId, setPreviewSessionId] = useState(0);
@@ -719,6 +722,11 @@ export function App() {
     void finishPreviewClose(projectId, disposedSessionId);
   }, [finishPreviewClose]);
 
+  /** 開啟建圖點雲檢視：`live` 為真時會持續輪詢最新快照（建圖進行中）。 */
+  const openCloudViewer = useCallback((projectPath: string, live: boolean) => {
+    setCloudTarget({ path: projectPath, live });
+  }, []);
+
   useEffect(() => () => {
     const active = activePreviewSession.current;
     if (active) {
@@ -730,6 +738,15 @@ export function App() {
     return <main className="app-shell preview-mode">
       <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("preview.preparingModule")}</strong></div></section>}>
         <GaussianViewer previewSessionId={previewSessionId} onExit={exitPreview} onDisposed={previewRendererDisposed} pipelineRunning={isRunning} />
+      </Suspense>
+    </main>;
+  }
+
+  // 建圖點雲檢視：與預覽同一種全螢幕模式，但顯示的是 COLMAP 的稀疏點雲與相機軌跡
+  if (cloudTarget) {
+    return <main className="app-shell preview-mode">
+      <Suspense fallback={<section className="preview-pane active preview-workspace"><div className="preview-empty"><LoaderCircle className="spin" size={24} /><strong>{t("pointcloud.loading")}</strong></div></section>}>
+        <PointCloudViewer projectPath={cloudTarget.path} live={cloudTarget.live} onExit={() => setCloudTarget(null)} />
       </Suspense>
     </main>;
   }
@@ -852,6 +869,7 @@ export function App() {
           {store.result.registeredRatio < 0.8 && <p className="completion-warning" role="status"><CircleAlert size={15} />{t("result.lowRegistration", { value: (store.result.registeredRatio * 100).toFixed(1) })}</p>}
           <div className="completion-result-actions">
             <button type="button" disabled={!store.projects.some((project) => project.id === store.result?.projectId && project.status === "completed")} onClick={previewCompletedResult}><Eye size={14} />{t("project.preview")}</button>
+            <button type="button" onClick={() => { const path = store.result?.projectPath; if (path) openCloudViewer(path, false); }}><Crosshair size={14} />{t("pointcloud.open")}</button>
             <button type="button" onClick={() => void exportCompletedResult()}><Download size={14} />{t("result.export")}</button>
             <button type="button" onClick={() => void revealCompletedResult()}><FolderOpen size={14} />{t("result.reveal")}</button>
           </div>

@@ -672,9 +672,16 @@ describe("App preview workspace", () => {
     await flush();
 
     expect(container.querySelector(".completion-result")).not.toBeNull();
-    const actions = container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button");
-    await act(async () => actions[1].click());
-    await act(async () => actions[2].click());
+    // 依「按鈕文字」而不是索引定位：完成卡日後新增按鈕（例如點雲檢視）不應讓測試失敗，
+    // 只要匯出／顯示資料夾這兩個動作仍然存在且可點擊。
+    const actions = Array.from(container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"));
+    const pick = (needle: string) => {
+      const hit = actions.find((button) => (button.textContent ?? "").includes(needle));
+      expect(hit, `找不到含「${needle}」的按鈕；現有按鈕：${actions.map((b) => b.textContent).join(" / ")}`).toBeTruthy();
+      return hit as HTMLButtonElement;
+    };
+    await act(async () => pick("导出").click());
+    await act(async () => pick("文件管理器").click());
     expect(mocks.exportPly).toHaveBeenCalledWith(result);
     expect(mocks.revealProject).toHaveBeenCalledWith(project);
   });

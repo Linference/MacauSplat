@@ -1395,3 +1395,28 @@ mod tests {
         assert!(!session.temporary.exists());
     }
 }
+
+/// 讀取專案最新的 COLMAP 快照（或最終模型），供應用內三維檢視點雲增長。
+#[tauri::command]
+pub async fn get_snapshot_cloud(
+    project_path: String,
+    max_points: Option<usize>,
+) -> std::result::Result<crate::reconstruction::cloud::SnapshotCloud, SplatError> {
+    let path = PathBuf::from(project_path);
+    // 讀檔與解析是阻塞工作，放到阻塞執行緒避免卡住事件迴圈
+    tokio::task::spawn_blocking(move || {
+        crate::reconstruction::cloud::load_snapshot_cloud(&path, max_points.unwrap_or(60_000))
+            .map_err(|e| SplatError::Process(format!("讀取快照失敗：{e}")))
+    })
+    .await
+    .map_err(|e| SplatError::Process(format!("讀取快照的工作失敗：{e}")))?
+}
+
+/// 列出專案中所有可檢視的快照（含最終模型）。
+#[tauri::command]
+pub async fn list_project_snapshots(
+    project_path: String,
+) -> std::result::Result<Vec<crate::reconstruction::cloud::SnapshotInfo>, SplatError> {
+    let path = PathBuf::from(project_path);
+    Ok(crate::reconstruction::cloud::list_snapshots(&path))
+}

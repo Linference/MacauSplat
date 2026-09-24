@@ -123,6 +123,19 @@ enum Commands {
         #[arg(long, default_value = "work/frames")]
         frames_href: String,
     },
+    /// Inspect the COLMAP snapshot point cloud (grows during mapping).
+    ///
+    /// This is what the in-app 3D view uses; the CLI form prints statistics so
+    /// the data path can be verified without launching the GUI.
+    Cloud {
+        project: PathBuf,
+        /// Maximum number of points sent to the viewer.
+        #[arg(long, default_value_t = 60000)]
+        max_points: usize,
+        /// Write the cloud as a PLY file for external viewing.
+        #[arg(long)]
+        ply: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -387,6 +400,42 @@ async fn execute(cli: Cli) -> Result<()> {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+            }
+        }
+        Commands::Cloud { project, max_points, ply } => {
+            use ooo_splat::reconstruction::cloud::{list_snapshots, load_snapshot_cloud};
+
+            let cloud = load_snapshot_cloud(&project, max_points)
+                .map_err(|e| SplatError::Process(format!("讀取快照失敗：{e}")))?;
+            let snaps = list_snapshots(&project);
+            println!(
+                "快照 {} 份｜目前檢視：{}｜點數 {} / {}｜相機 {} 台",
+                snaps.len(),
+                cloud.snapshot.clone().unwrap_or_else(|| "（無）".into()),
+                cloud.point_count,
+                cloud.total_points,
+                cloud.cameras.len() / 3,
+            );
+            println!(
+                "包圍盒：x {:.2}..{:.2}｜y {:.2}..{:.2}｜z {:.2}..{:.2}{}",
+                cloud.bounds[0], cloud.bounds[3], cloud.bounds[1], cloud.bounds[4],
+                cloud.bounds[2], cloud.bounds[5],
+                if cloud.is_final { "｜來源：最終模型" } else { "｜來源：中間快照" },
+            );
+            if let Some(path) = ply {
+                let mut out = String::from("ply\nformat ascii 1.0\n");
+                out.push_str(&format!("element vertex {}\n", cloud.point_count));
+                out.push_str("property float x\nproperty float y\nproperty float z\n");
+                out.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n");
+                for i in 0..cloud.point_count {
+                    out.push_str(&format!(
+                        "{:.4} {:.4} {:.4} {} {} {}\n",
+                        cloud.positions[i * 3], cloud.positions[i * 3 + 1], cloud.positions[i * 3 + 2],
+                        cloud.colors[i * 3], cloud.colors[i * 3 + 1], cloud.colors[i * 3 + 2],
+                    ));
+                }
+                std::fs::write(&path, out)?;
+                println!("已輸出 PLY：{}", path.display());
             }
         }
     }

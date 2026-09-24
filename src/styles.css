@@ -541,3 +541,69 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 @media (max-width: 700px) {
   .privacy-columns { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------- 建圖點雲檢視
+   對應 src/components/PointCloud/PointCloudViewer.tsx
+   沿用應用既有的深色面板語彙，讓它看起來是原生的一部分而不是外掛頁面。 */
+.pointcloud-viewer {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #0b0f14;
+  color: var(--text-primary, #e8eef5);
+}
+.pointcloud-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel, #10161d);
+  border-bottom: 1px solid var(--line, #22303f);
+}
+.pointcloud-title { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.pointcloud-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 232, 255, 0.12);
+  color: #38e8ff;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.pointcloud-actions { display: flex; gap: 8px; }
+.pointcloud-stage { position: relative; flex: 1; min-height: 0; }
+.pointcloud-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.pointcloud-stage canvas:active { cursor: grabbing; }
+.pointcloud-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #8fa3b8;
+  background: rgba(11, 15, 20, 0.72);
+  font-size: 13px;
+  text-align: center;
+  padding: 0 24px;
+}
+.pointcloud-overlay.error { color: #f87171; }
+.pointcloud-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--panel, #10161d);
+  border-top: 1px solid var(--line, #22303f);
+  font-size: 12px;
+}
+.pointcloud-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.pointcloud-stats dt { color: #7f93a8; }
+.pointcloud-stats dd { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; color: #c8a24a; }

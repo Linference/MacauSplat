@@ -42,6 +42,8 @@ pub fn run_app() {
             commands::cancel_gaussian_video_export,
             commands::initialize_telemetry,
             commands::set_telemetry_consent,
+            commands::list_project_snapshots,
+            commands::get_snapshot_cloud,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MacauSplat");

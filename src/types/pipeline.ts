@@ -168,3 +168,29 @@ export interface GaussianVideoExportResult {
   fps: number;
   durationMs: number;
 }
+
+/** COLMAP 快照點雲（由 Rust 端 reconstruction::cloud 產生）。 */
+export interface SnapshotCloud {
+  /** 交錯的 xyz 座標。 */
+  positions: number[];
+  /** 交錯的 rgb 顏色。 */
+  colors: number[];
+  point_count: number;
+  total_points: number;
+  /** 每台已註冊相機的中心座標（交錯 xyz）。 */
+  cameras: number[];
+  /** [min_x, min_y, min_z, max_x, max_y, max_z] */
+  bounds: [number, number, number, number, number, number];
+  /** 目前檢視的快照名稱；null 表示尚無快照。 */
+  snapshot: string | null;
+  snapshot_count: number;
+  /** 來源是否為最終模型（而非中間快照）。 */
+  is_final: boolean;
+}
+
+/** 可檢視的快照項目。 */
+export interface SnapshotInfo {
+  name: string;
+  path: string;
+  is_final: boolean;
+}
