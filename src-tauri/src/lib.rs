@@ -1,4 +1,4 @@
-pub mod commands;
+﻿pub mod commands;
 pub mod engines;
 pub mod error;
 pub mod pipeline;
@@ -44,5 +44,5 @@ pub fn run_app() {
             commands::set_telemetry_consent,
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run OOOSplat");
+        .expect("failed to run MacauSplat");
 }

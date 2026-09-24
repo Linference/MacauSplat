@@ -1,10 +1,66 @@
-OOOSplat
-Copyright 2026 ooolabdev
+MacauSplat
+Copyright 2026 Linference
 
-Licensed under the Apache License, Version 2.0.
+This product is a derivative work based on OOOSplat
+(https://github.com/ooolabdev/ooosplat), Copyright 2026 ooolabdev,
+licensed under the Apache License, Version 2.0.
+
+=====================================================================
+Statement of changes (Apache License 2.0, Section 4(b))
+=====================================================================
+
+The following files were added or modified relative to upstream OOOSplat.
+No upstream functionality was removed.
+
+ADDED (this project's contribution — see docs/DESIGN.md):
+
+  src-tauri/src/reconstruction/colmap.rs
+      COLMAP sparse-reconstruction reader (cameras.bin / images.bin /
+      points3D.bin) and camera projection mathematics, with unit tests
+      that verify the binary layout by round-trip against synthetic files.
+
+  src-tauri/src/reconstruction/inspect.rs
+      Project audit: frame counts, camera registration ratio, camera
+      intrinsics, sparse point statistics, and a readiness check that
+      decides whether a reconstruction can be used for auto-annotation.
+
+  src-tauri/src/reconstruction/autolabel.rs
+      3D bounding-box fitting from the sparse point cloud (with the up
+      axis inferred from the camera trajectory), projection of that box
+      into every registered frame, per-frame quality checks, YOLO label
+      export, CSV/JSON reports and a dependency-free HTML review sheet.
+
+  docs/DESIGN.md, docs/COMPLIANCE.md
+      Design rationale and licensing/originality statement.
+
+MODIFIED (product identity and CLI surface only; no upstream logic changed):
+
+  package.json                 name: "ooo-splat"  -> "macausplat"
+  src-tauri/tauri.conf.json    productName/title: "OOOSplat" -> "MacauSplat"
+                               (identifier "studio.ooo.splat" intentionally
+                                left unchanged so existing settings and the
+                                project index keep working)
+  src-tauri/src/lib.rs         window failure message text
+  src-tauri/src/bin/splatstudio.rs
+                               CLI description text; added three subcommands:
+                               `inspect`, `fit-box`, `annotate`
+  src-tauri/src/reconstruction/mod.rs
+                               registered the three new modules
+  README.md                    added a project banner
+  TRADEMARK_POLICY.md          retained verbatim (upstream document)
+
+UNCHANGED: the reconstruction pipeline itself (FFmpeg frame extraction,
+COLMAP feature extraction/mapping, Brush training, PLY publishing, Gaussian
+preview, editing, animation export, telemetry).
+
+=====================================================================
+Third-party software
+=====================================================================
 
 This product includes third-party software. See
 licenses/THIRD_PARTY_NOTICES.txt for attribution and license information.
 
 The Apache License does not grant permission to use the OOOSplat name, logo,
-icons, or other brand features as trademarks. See TRADEMARK_POLICY.md.
+icons, or other brand features as trademarks. This derivative work therefore
+does not use them; it is distributed under the name "MacauSplat" and claims no
+affiliation with, or endorsement by, ooolabdev.

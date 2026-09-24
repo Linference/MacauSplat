@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use ooo_splat::{
@@ -14,7 +14,7 @@ use ooo_splat::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "splatstudio", version, about = "OOOSplat local pipeline CLI")]
+#[command(name = "splatstudio", version, about = "MacauSplat local pipeline CLI")]
 struct Cli {
     /// Override the bundled engine directory (also supports OOOSPLAT_ENGINE_DIR).
     #[arg(long, global = true)]
@@ -50,6 +50,59 @@ enum Commands {
         projects_root: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = Quality::Balanced)]
         quality: Quality,
+    },
+    /// Audit a finished project: frames, registered camera poses, sparse points.
+    ///
+    /// This is the first step of the dataset pipeline — it reports whether a
+    /// reconstruction contains what automatic annotation needs.
+    Inspect {
+        /// Project directory (the one containing `work/colmap`).
+        project: PathBuf,
+    },
+    /// Fit a 3D bounding box around the reconstructed scene (writes `box.json`).
+    ///
+    /// The up axis is inferred from the camera trajectory, because COLMAP's world
+    /// frame is arbitrary and has no gravity direction.
+    FitBox {
+        project: PathBuf,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        /// Percentile trim per axis (0.02 keeps the 2%..98% range).
+        #[arg(long, default_value_t = 0.02)]
+        trim: f64,
+        /// Use the world Y axis as "up" instead of inferring it from the trajectory.
+        #[arg(long)]
+        no_infer_up: bool,
+    },
+    /// Project a 3D box into every registered frame and write YOLO labels.
+    ///
+    /// Outputs: `labels/*.txt`, `annotations.json`, `annotations.csv`, `qa.html`.
+    Annotate {
+        project: PathBuf,
+        /// Path to `box.json` produced by `fit-box`.
+        #[arg(long)]
+        box_path: PathBuf,
+        /// Class index written into the YOLO labels.
+        #[arg(long, default_value_t = 0)]
+        class_id: usize,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        /// Minimum visible box corners (of 8) for a frame to be kept.
+        #[arg(long, default_value_t = 4)]
+        min_corners: usize,
+        /// Minimum number of in-box sparse points observed in the frame (occlusion proxy).
+        #[arg(long, default_value_t = 3)]
+        min_observed: usize,
+        /// Strict mode: keep only frames where all 8 box corners are visible.
+        ///
+        /// When a corner lies behind the camera it cannot be projected, so the
+        /// projected box may underestimate the true outline. Enable this when the
+        /// label must fully contain the object.
+        #[arg(long)]
+        require_all_corners: bool,
+        /// Frames shown in the HTML review sheet.
+        #[arg(long, default_value_t = 60)]
+        qa_limit: usize,
     },
 }
 
@@ -173,6 +226,107 @@ async fn execute(cli: Cli) -> Result<()> {
                 }
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Inspect { project } => {
+            let audit = ooo_splat::reconstruction::inspect::audit_project(&project)
+                .map_err(|e| SplatError::Process(format!("專案審計失敗：{e}")))?;
+            println!("{}", serde_json::to_string_pretty(&audit)?);
+            if !audit.ready_for_annotation {
+                eprintln!("⚠ 此專案目前不適合自動標註（尚有 blocker）");
+            }
+        }
+        Commands::FitBox {
+            project,
+            out,
+            trim,
+            no_infer_up,
+        } => {
+            use ooo_splat::reconstruction::autolabel::{fit_box_from_points, FitOptions};
+            use ooo_splat::reconstruction::colmap::SparseReconstruction;
+
+            let reconstruction = SparseReconstruction::load(project.join("work/colmap"))
+                .or_else(|_| SparseReconstruction::load(&project))
+                .map_err(|e| SplatError::Process(format!("讀取稀疏重建失敗：{e}")))?;
+            let options = FitOptions {
+                trim,
+                infer_up: !no_infer_up,
+                ..FitOptions::default()
+            };
+            let box3d = fit_box_from_points(&reconstruction, &options)
+                .ok_or_else(|| SplatError::Process("點雲不足，無法自動擬合包圍盒（可用 --no-infer-up 或人工指定）".into()))?;
+            std::fs::create_dir_all(&out)?;
+            let path = out.join("box.json");
+            std::fs::write(&path, serde_json::to_string_pretty(&box3d)?)?;
+            println!(
+                "包圍盒：{:.2} × {:.2} × {:.2} m，中心 [{:.2}, {:.2}, {:.2}]，上軸{}，取自 {} 個點",
+                box3d.size[0],
+                box3d.size[1],
+                box3d.size[2],
+                box3d.center[0],
+                box3d.center[1],
+                box3d.center[2],
+                if box3d.up_axis_estimated { "為推定值（軌跡退化）" } else { "由相機軌跡推定" },
+                box3d.fitted_from_points
+            );
+            println!("已寫入 {}", path.display());
+        }
+        Commands::Annotate {
+            project,
+            box_path,
+            class_id,
+            out,
+            min_corners,
+            min_observed,
+            require_all_corners,
+            qa_limit,
+        } => {
+            use ooo_splat::reconstruction::autolabel::{
+                annotate_reconstruction, summarize, write_annotations_csv, write_qa_html, write_yolo_labels,
+                AnnotateOptions, Box3D,
+            };
+            use ooo_splat::reconstruction::colmap::SparseReconstruction;
+
+            let reconstruction = SparseReconstruction::load(project.join("work/colmap"))
+                .or_else(|_| SparseReconstruction::load(&project))
+                .map_err(|e| SplatError::Process(format!("讀取稀疏重建失敗：{e}")))?;
+            let box3d: Box3D = serde_json::from_str(&std::fs::read_to_string(&box_path)?)
+                .map_err(|e| SplatError::Process(format!("box.json 解析失敗：{e}")))?;
+            let options = AnnotateOptions {
+                min_visible_corners: min_corners,
+                min_observed_points: min_observed,
+                require_all_corners,
+                ..AnnotateOptions::default()
+            };
+            let annotations = annotate_reconstruction(&reconstruction, &box3d, &options);
+            let summary = summarize(&annotations);
+            std::fs::create_dir_all(&out)?;
+            let labels_dir = out.join("labels");
+            let written = write_yolo_labels(&labels_dir, &annotations, class_id)?;
+            std::fs::write(out.join("annotations.json"), serde_json::to_string_pretty(&annotations)?)?;
+            write_annotations_csv(out.join("annotations.csv"), &annotations)?;
+            // QA 表以 out/ 為基準指向影格目錄
+            write_qa_html(
+                out.join("qa.html"),
+                "../work/frames",
+                &annotations,
+                &summary,
+                &box3d,
+                qa_limit,
+            )?;
+            println!(
+                "影格 {} 張 → 採用 {} 張（{:.1}%），已寫出 {} 個 YOLO 標籤",
+                summary.frames_total,
+                summary.frames_accepted,
+                summary.acceptance_ratio * 100.0,
+                written
+            );
+            if !summary.rejection_reasons.is_empty() {
+                println!("主要略過原因：");
+                for (reason, n) in summary.rejection_reasons.iter().take(5) {
+                    println!("  {n:4} 張：{reason}");
+                }
+            }
+            println!("輸出：{}（labels/、annotations.json、annotations.csv、qa.html）", out.display());
         }
     }
     Ok(())
