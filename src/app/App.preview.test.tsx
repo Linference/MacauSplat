@@ -705,7 +705,7 @@ describe("App preview workspace", () => {
     const completed = {
       projectId: project.id,
       projectPath: project.projectPath,
-      finalPly: `${project.path}/final.ply`,
+      finalPly: `${project.projectPath}/final.ply`,
       fileSize: 1024,
       splatCount: 1000,
       inputImages: 273,
@@ -714,6 +714,8 @@ describe("App preview workspace", () => {
       points3d: 44_011,
       durationMs: 1000,
       completedAt: new Date().toISOString(),
+      warning: null,
+      logsDirectory: `${project.projectPath}/logs`,
     };
     const projectPath = completed.projectPath;
     await act(async () => {
