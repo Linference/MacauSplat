@@ -91,14 +91,6 @@ pub struct MonitorSnapshot {
     pub final_ply: Option<u64>,
 }
 
-fn tail_lines(text: &str, n: usize) -> Vec<&str> {
-    let mut v: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if v.len() > n {
-        v.drain(0..v.len() - n);
-    }
-    v
-}
-
 /// 解析 FFmpeg 的 `-progress` 輸出。
 pub fn parse_ffmpeg_progress(text: &str) -> FfmpegProgress {
     let mut p = FfmpegProgress::default();
@@ -175,7 +167,7 @@ pub fn parse_colmap_progress(text: &str) -> ColmapProgress {
                     p.matching_total = b.trim().parse().unwrap_or(p.matching_total);
                 }
             }
-        } else if let Some(idx) = line.find("Registering image #") {
+        } else if line.contains("Registering image #") {
             // 真正的註冊事件：行內附帶 (num_reg_frames=M)，M 才是目前重建的影格數。
             // 不能數行數——mapper 失敗重試會產生大量重複行。
             if let Some(mpos) = line.find("num_reg_frames=") {
