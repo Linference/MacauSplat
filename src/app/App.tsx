@@ -4,7 +4,7 @@ import {
   Download, Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
   Languages, Settings2, X, Zap,
 } from "lucide-react";
-import appLogo from "../../assets/app-icon.svg";
+import appLogo from "../../assets/app-icon.png";
 import packageMetadata from "../../package.json";
 import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
@@ -754,7 +754,7 @@ export function App() {
   return <main className={isResizing ? "app-shell resizing" : "app-shell"}>
     <div className="interface-frame" style={{ "--ui-scale": uiScale / 100, "--ui-size": `${10000 / uiScale}%` } as CSSProperties}>
     <header className="topbar">
-      <div className="brand-lockup"><span className="brand-mark"><img src={appLogo} alt="" aria-hidden="true" /></span><span className="brand-name">OOO<span>Splat</span></span><span className="version-tag">LOCAL / {packageMetadata.version}</span></div>
+      <div className="brand-lockup"><span className="brand-mark"><img src={appLogo} alt="" aria-hidden="true" /></span><span className="brand-name">Macau<span>Splat</span></span><span className="version-tag">LOCAL / {packageMetadata.version}</span></div>
       <div className="topbar-actions">
         <button className="settings-action language-action" type="button" title={t("language.switchTo")} aria-label={t("language.switchTo")} onClick={toggleLocale}><Languages size={15} />{t("language.target")}</button>
         {telemetryPreferences && <button className="settings-action" type="button" onClick={() => setPrivacySettingsOpen(true)}><Settings2 size={15} />{t("top.settings")}</button>}

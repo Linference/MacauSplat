@@ -55,7 +55,7 @@ import {
   RectangleHorizontal,
   Trash2,
 } from "lucide-react";
-import appLogo from "../../../assets/app-icon.svg";
+import appLogo from "../../../assets/app-icon.png";
 import {
   beginGaussianEditSave,
   beginGaussianVideoExport,
@@ -180,7 +180,7 @@ function effectRadialLimit(fullBounds: BoundingBox, effectBounds: BoundingBox) {
 }
 
 const PreviewCamera = memo(forwardRef<PcEntity>(function PreviewCamera(_props, ref) {
-  return <Entity ref={ref} name="OOOSplat Preview Camera" position={INITIAL_CAMERA_POSITION} rotation={IDENTITY_ROTATION} scale={IDENTITY_SCALE}>
+  return <Entity ref={ref} name="MacauSplat Preview Camera" position={INITIAL_CAMERA_POSITION} rotation={IDENTITY_ROTATION} scale={IDENTITY_SCALE}>
     <Camera clearColor="#0e1117" fov={52} nearClip={0.01} farClip={10000} gammaCorrection={GAMMA_SRGB} toneMapping={TONEMAP_LINEAR} />
   </Entity>;
 }));
@@ -686,7 +686,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
     outputCanvas.width = GAUSSIAN_VIDEO_WIDTH;
     outputCanvas.height = GAUSSIAN_VIDEO_HEIGHT;
     const videoTexture = new Texture(graphicsDevice, {
-      name: "OOOSplat Portrait Video",
+      name: "MacauSplat Portrait Video",
       width: GAUSSIAN_VIDEO_WIDTH,
       height: GAUSSIAN_VIDEO_HEIGHT,
       format: PIXELFORMAT_RGBA8,
@@ -697,7 +697,7 @@ const LoadedSplatScene = forwardRef<SplatSceneApi, SplatSceneProps>(function Loa
       addressV: ADDRESS_CLAMP_TO_EDGE,
     });
     const videoRenderTarget = new RenderTarget({
-      name: "OOOSplat Portrait Video Target",
+      name: "MacauSplat Portrait Video Target",
       colorBuffer: videoTexture,
       depth: true,
       samples: 1,
@@ -1413,7 +1413,7 @@ export function GaussianViewer({ previewSessionId, onExit, onDisposed, pipelineR
         </Application>
         {mode === "preview" && <div ref={captureGuideRef} className="portrait-capture-guide" aria-hidden="true">
           <div className="portrait-frame-label"><span>1080 × 1920</span><span>30 FPS</span></div>
-          <div className="preview-watermark"><img src={appLogo} alt="" /><strong>OOOSplat</strong></div>
+          <div className="preview-watermark"><img src={appLogo} alt="" /><strong>MacauSplat</strong></div>
         </div>}
         {mode === "preview" && <div className="portrait-matte" aria-hidden="true" />}
         {viewport.phase !== "ready" && viewport.phase !== "error" && <div className="viewport-overlay"><LoaderCircle className="spin" size={22} /><strong>{loadingLabel}</strong>{viewport.phase === "loading" && <span>{(viewport.progress * 100).toFixed(0)}%</span>}</div>}

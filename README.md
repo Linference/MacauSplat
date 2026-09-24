@@ -66,7 +66,7 @@ splatstudio annotate "<專案目錄>" --box-path out/box.json --class-id 0 --out
 [中文](README.md) | [English](README_EN.md)
 
 <p align="center">
-  <img src="assets/readme-logo.svg" alt="OOOSplat Logo" width="180">
+  <img src="assets/logo-master-1024.png" alt="OOOSplat Logo" width="180">
 </p>
 
 <p align="center">

@@ -62,7 +62,7 @@ export function drawOoosplatWatermark(
   const margin = 48;
   const logoSize = 70;
   const gap = 18;
-  const label = "OOOSplat";
+  const label = "MacauSplat";
   context.save();
   context.font = '700 40px Arial, "Segoe UI", sans-serif';
   context.textBaseline = "middle";
