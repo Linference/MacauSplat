@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::colmap::{SparseReconstruction, normalize_name};
+use super::colmap::{normalize_name, SparseReconstruction};
 
 /// 一份可渲染的點雲快照。
 #[derive(Debug, Clone, Serialize)]
@@ -113,7 +113,9 @@ pub fn downsample_indices(total: usize, max_points: usize) -> Vec<usize> {
         return (0..total).collect();
     }
     let stride = total as f64 / max_points as f64;
-    (0..max_points).map(|i| ((i as f64) * stride) as usize).collect()
+    (0..max_points)
+        .map(|i| ((i as f64) * stride) as usize)
+        .collect()
 }
 
 /// 載入最新的快照（若沒有快照則載入最終模型）。
@@ -138,7 +140,13 @@ pub fn load_snapshot_cloud(
         },
     };
     let reconstruction = SparseReconstruction::load_dir(&dir)?;
-    Ok(build_cloud(&reconstruction, max_points, label, snapshot_count, is_final))
+    Ok(build_cloud(
+        &reconstruction,
+        max_points,
+        label,
+        snapshot_count,
+        is_final,
+    ))
 }
 
 /// 由稀疏重建組出可渲染的點雲（抽出來以便測試）。
@@ -205,13 +213,20 @@ pub fn list_snapshots(project_dir: &Path) -> Vec<SnapshotInfo> {
     let mut out: Vec<SnapshotInfo> = snapshot_directories(project_dir)
         .into_iter()
         .map(|p| SnapshotInfo {
-            name: p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            name: p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
             path: p.display().to_string(),
             is_final: false,
         })
         .collect();
     if let Some(dir) = final_model_directory(project_dir) {
-        out.push(SnapshotInfo { name: "final".into(), path: dir.display().to_string(), is_final: true });
+        out.push(SnapshotInfo {
+            name: "final".into(),
+            path: dir.display().to_string(),
+            is_final: true,
+        });
     }
     out
 }
@@ -228,7 +243,11 @@ pub fn registered_image_names(project_dir: &Path, limit: usize) -> Vec<String> {
     let Ok(reconstruction) = SparseReconstruction::load_dir(&dir) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = reconstruction.images.iter().map(|i| normalize_name(&i.name)).collect();
+    let mut names: Vec<String> = reconstruction
+        .images
+        .iter()
+        .map(|i| normalize_name(&i.name))
+        .collect();
     names.sort();
     names.truncate(limit);
     names
@@ -236,8 +255,8 @@ pub fn registered_image_names(project_dir: &Path, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::colmap::{Camera, CameraModel, Image, Point3D};
+    use super::*;
     use std::collections::HashMap;
     use std::io::Write;
 
@@ -266,10 +285,28 @@ mod tests {
             },
         );
         let images = vec![
-            Image { id: 1, qvec: [1.0, 0.0, 0.0, 0.0], tvec: [0.0, 0.0, 0.0], camera_id: 1, name: "a.jpg".into(), points2d: vec![] },
-            Image { id: 2, qvec: [1.0, 0.0, 0.0, 0.0], tvec: [-1.0, 0.0, 0.0], camera_id: 1, name: "b.jpg".into(), points2d: vec![] },
+            Image {
+                id: 1,
+                qvec: [1.0, 0.0, 0.0, 0.0],
+                tvec: [0.0, 0.0, 0.0],
+                camera_id: 1,
+                name: "a.jpg".into(),
+                points2d: vec![],
+            },
+            Image {
+                id: 2,
+                qvec: [1.0, 0.0, 0.0, 0.0],
+                tvec: [-1.0, 0.0, 0.0],
+                camera_id: 1,
+                name: "b.jpg".into(),
+                points2d: vec![],
+            },
         ];
-        SparseReconstruction { cameras, images, points: rgb_palette(points) }
+        SparseReconstruction {
+            cameras,
+            images,
+            points: rgb_palette(points),
+        }
     }
 
     /// 降採樣：不超過上限、且均勻覆蓋整個範圍（而非只取前面一小段）。
@@ -306,18 +343,33 @@ mod tests {
         assert_eq!(cloud.snapshot_count, 4);
         assert!(!cloud.is_final);
         // 包圍盒：x 從 0 到接近 499、y 從 0 到接近 998
-        assert!(cloud.bounds[0] >= 0.0 && cloud.bounds[3] > 400.0, "bounds={:?}", cloud.bounds);
-        assert!(cloud.bounds[1] >= 0.0 && cloud.bounds[4] > 800.0, "bounds={:?}", cloud.bounds);
+        assert!(
+            cloud.bounds[0] >= 0.0 && cloud.bounds[3] > 400.0,
+            "bounds={:?}",
+            cloud.bounds
+        );
+        assert!(
+            cloud.bounds[1] >= 0.0 && cloud.bounds[4] > 800.0,
+            "bounds={:?}",
+            cloud.bounds
+        );
         // 兩台相機：中心分別為 (0,0,0) 與 (1,0,0)
         assert_eq!(cloud.cameras.len(), 6);
         assert!((cloud.cameras[0] - 0.0).abs() < 1e-6);
-        assert!((cloud.cameras[3] - 1.0).abs() < 1e-6, "第二台相機中心應在 x=1");
+        assert!(
+            (cloud.cameras[3] - 1.0).abs() < 1e-6,
+            "第二台相機中心應在 x=1"
+        );
     }
 
     /// 空的重建不應 panic，且包圍盒退化為 0。
     #[test]
     fn empty_reconstruction_is_safe() {
-        let recon = SparseReconstruction { cameras: HashMap::new(), images: vec![], points: vec![] };
+        let recon = SparseReconstruction {
+            cameras: HashMap::new(),
+            images: vec![],
+            points: vec![],
+        };
         let cloud = build_cloud(&recon, 100, None, 0, false);
         assert_eq!(cloud.point_count, 0);
         assert!(cloud.positions.is_empty());
@@ -351,7 +403,11 @@ mod tests {
             write_model(&dir, &["a.jpg"], if name == "10" { 5 } else { 3 });
         }
         let cloud = load_snapshot_cloud(&root, 1000).expect("應讀到最新快照");
-        assert_eq!(cloud.snapshot.as_deref(), Some("10"), "應選數字最大的快照（10 而非 2）");
+        assert_eq!(
+            cloud.snapshot.as_deref(),
+            Some("10"),
+            "應選數字最大的快照（10 而非 2）"
+        );
         assert_eq!(cloud.snapshot_count, 2);
         assert_eq!(cloud.point_count, 5);
         assert!(!cloud.is_final);

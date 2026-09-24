@@ -284,8 +284,11 @@ async fn execute(cli: Cli) -> Result<()> {
                 infer_up: !no_infer_up,
                 ..FitOptions::default()
             };
-            let box3d = fit_box_from_points(&reconstruction, &options)
-                .ok_or_else(|| SplatError::Process("點雲不足，無法自動擬合包圍盒（可用 --no-infer-up 或人工指定）".into()))?;
+            let box3d = fit_box_from_points(&reconstruction, &options).ok_or_else(|| {
+                SplatError::Process(
+                    "點雲不足，無法自動擬合包圍盒（可用 --no-infer-up 或人工指定）".into(),
+                )
+            })?;
             std::fs::create_dir_all(&out)?;
             let path = out.join("box.json");
             std::fs::write(&path, serde_json::to_string_pretty(&box3d)?)?;
@@ -297,7 +300,11 @@ async fn execute(cli: Cli) -> Result<()> {
                 box3d.center[0],
                 box3d.center[1],
                 box3d.center[2],
-                if box3d.up_axis_estimated { "為推定值（軌跡退化）" } else { "由相機軌跡推定" },
+                if box3d.up_axis_estimated {
+                    "為推定值（軌跡退化）"
+                } else {
+                    "由相機軌跡推定"
+                },
                 box3d.fitted_from_points
             );
             println!("已寫入 {}", path.display());
@@ -313,8 +320,8 @@ async fn execute(cli: Cli) -> Result<()> {
             qa_limit,
         } => {
             use ooo_splat::reconstruction::autolabel::{
-                annotate_reconstruction, summarize, write_annotations_csv, write_qa_html, write_yolo_labels,
-                AnnotateOptions, Box3D,
+                annotate_reconstruction, summarize, write_annotations_csv, write_qa_html,
+                write_yolo_labels, AnnotateOptions, Box3D,
             };
             use ooo_splat::reconstruction::colmap::SparseReconstruction;
 
@@ -334,7 +341,10 @@ async fn execute(cli: Cli) -> Result<()> {
             std::fs::create_dir_all(&out)?;
             let labels_dir = out.join("labels");
             let written = write_yolo_labels(&labels_dir, &annotations, class_id)?;
-            std::fs::write(out.join("annotations.json"), serde_json::to_string_pretty(&annotations)?)?;
+            std::fs::write(
+                out.join("annotations.json"),
+                serde_json::to_string_pretty(&annotations)?,
+            )?;
             write_annotations_csv(out.join("annotations.csv"), &annotations)?;
             // QA 表以 out/ 為基準指向影格目錄
             write_qa_html(
@@ -358,7 +368,10 @@ async fn execute(cli: Cli) -> Result<()> {
                     println!("  {n:4} 張：{reason}");
                 }
             }
-            println!("輸出：{}（labels/、annotations.json、annotations.csv、qa.html）", out.display());
+            println!(
+                "輸出：{}（labels/、annotations.json、annotations.csv、qa.html）",
+                out.display()
+            );
         }
         Commands::Monitor {
             project,
@@ -375,10 +388,19 @@ async fn execute(cli: Cli) -> Result<()> {
                     std::fs::create_dir_all(parent)?;
                 }
             }
-            let title = format!("{} · 即時監視", project.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+            let title = format!(
+                "{} · 即時監視",
+                project
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            );
             loop {
                 let snap = read_snapshot(&project);
-                std::fs::write(&out_path, render_html(&snap, &frames_href, interval, &title))?;
+                std::fs::write(
+                    &out_path,
+                    render_html(&snap, &frames_href, interval, &title),
+                )?;
                 // 每次迭代都印出文字摘要，方便在終端機直接看（不必開瀏覽器）
                 println!(
                     "[{}] 階段：{}\n    抽幀 {} 張（速度 {}）｜特徵 {} 張｜匹配 {}/{}｜已註冊 {}（{}）｜三維點 {}｜快照 {}",
@@ -396,13 +418,19 @@ async fn execute(cli: Cli) -> Result<()> {
                 );
                 if !watch {
                     println!("已寫入 {}", out_path.display());
-                    println!("用瀏覽器開啟即可（頁面每 {interval} 秒自動重整）；要持續更新請加 --watch");
+                    println!(
+                        "用瀏覽器開啟即可（頁面每 {interval} 秒自動重整）；要持續更新請加 --watch"
+                    );
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
             }
         }
-        Commands::Cloud { project, max_points, ply } => {
+        Commands::Cloud {
+            project,
+            max_points,
+            ply,
+        } => {
             use ooo_splat::reconstruction::cloud::{list_snapshots, load_snapshot_cloud};
 
             let cloud = load_snapshot_cloud(&project, max_points)
@@ -418,20 +446,34 @@ async fn execute(cli: Cli) -> Result<()> {
             );
             println!(
                 "包圍盒：x {:.2}..{:.2}｜y {:.2}..{:.2}｜z {:.2}..{:.2}{}",
-                cloud.bounds[0], cloud.bounds[3], cloud.bounds[1], cloud.bounds[4],
-                cloud.bounds[2], cloud.bounds[5],
-                if cloud.is_final { "｜來源：最終模型" } else { "｜來源：中間快照" },
+                cloud.bounds[0],
+                cloud.bounds[3],
+                cloud.bounds[1],
+                cloud.bounds[4],
+                cloud.bounds[2],
+                cloud.bounds[5],
+                if cloud.is_final {
+                    "｜來源：最終模型"
+                } else {
+                    "｜來源：中間快照"
+                },
             );
             if let Some(path) = ply {
                 let mut out = String::from("ply\nformat ascii 1.0\n");
                 out.push_str(&format!("element vertex {}\n", cloud.point_count));
                 out.push_str("property float x\nproperty float y\nproperty float z\n");
-                out.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n");
+                out.push_str(
+                    "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
+                );
                 for i in 0..cloud.point_count {
                     out.push_str(&format!(
                         "{:.4} {:.4} {:.4} {} {} {}\n",
-                        cloud.positions[i * 3], cloud.positions[i * 3 + 1], cloud.positions[i * 3 + 2],
-                        cloud.colors[i * 3], cloud.colors[i * 3 + 1], cloud.colors[i * 3 + 2],
+                        cloud.positions[i * 3],
+                        cloud.positions[i * 3 + 1],
+                        cloud.positions[i * 3 + 2],
+                        cloud.colors[i * 3],
+                        cloud.colors[i * 3 + 1],
+                        cloud.colors[i * 3 + 2],
                     ));
                 }
                 std::fs::write(&path, out)?;

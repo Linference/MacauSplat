@@ -29,12 +29,13 @@
     "setup:build-deps:macos": "bash scripts/setup-macos-build-deps.sh",
     "build:engines:macos": "bash scripts/build-engines-macos.sh",
     "verify:licenses:macos": "node scripts/verify-licenses.mjs",
-    "build:bundle": "npm run verify:engines && npm run verify:licenses && npm run build",
-    "build:bundle:windows": "npm run verify:engines:windows && npm run verify:licenses:windows && npm run build",
+    "build:bundle": "npm run stage:cli && npm run verify:engines && npm run verify:licenses && npm run build",
+    "build:bundle:windows": "npm run stage:cli && npm run verify:engines:windows && npm run verify:licenses:windows && npm run build",
     "package:windows": "npm run verify:telemetry:release && npm run tauri -- build --bundles nsis && node scripts/collect-windows-installer.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "stage:cli": "node scripts/stage-cli.mjs"
   },
   "dependencies": {
     "@playcanvas/react": "0.11.5",

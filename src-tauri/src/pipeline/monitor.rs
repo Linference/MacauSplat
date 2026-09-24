@@ -128,7 +128,11 @@ pub fn parse_colmap_progress(text: &str) -> ColmapProgress {
         }
         if expect_command {
             // 子命令名稱是 arguments: 之後第一個非選項、非空行
-            if !line.is_empty() && !line.starts_with('-') && !line.contains(":\\") && !line.contains(":/") {
+            if !line.is_empty()
+                && !line.starts_with('-')
+                && !line.contains(":\\")
+                && !line.contains(":/")
+            {
                 p.command = Some(line.to_string());
                 // 每次新的子命令都把上一階段的計數歸零，避免把前後階段混在一起
                 match line {
@@ -143,7 +147,8 @@ pub fn parse_colmap_progress(text: &str) -> ColmapProgress {
                     "mapper" => {
                         p.registered_images = 0;
                         p.points = 0;
-                    }                    _ => {}
+                    }
+                    _ => {}
                 }
             }
             expect_command = false;
@@ -152,7 +157,7 @@ pub fn parse_colmap_progress(text: &str) -> ColmapProgress {
         if line.contains("Features:") && line.contains("(SIFT)") {
             p.feature_images += 1;
             if let Some(rest) = line.split("Features:").nth(1) {
-                if let Some(num) = rest.trim().split_whitespace().next() {
+                if let Some(num) = rest.split_whitespace().next() {
                     if let Ok(n) = num.parse::<usize>() {
                         p.last_feature_count = n;
                     }
@@ -229,7 +234,11 @@ pub fn parse_brush_progress(text: &str, model_exists: bool) -> BrushProgress {
 /// 這比解析日誌精確得多：日誌反映的是「過程」（含失敗重試），
 /// 模型檔反映的是「結果」。而且只讀 8 位元組，成本極低，適合每兩秒刷新一次。
 pub fn count_model_images(project_dir: &Path) -> Option<usize> {
-    for rel in ["work/colmap/sparse/0/images.bin", "work/colmap/images.bin", "sparse/0/images.bin"] {
+    for rel in [
+        "work/colmap/sparse/0/images.bin",
+        "work/colmap/images.bin",
+        "sparse/0/images.bin",
+    ] {
         let p = project_dir.join(rel);
         if let Ok(bytes) = std::fs::read(&p) {
             if bytes.len() >= 8 {
@@ -268,7 +277,7 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
             }
         }
     }
-    frames.sort_by(|a, b| b.0.cmp(&a.0));
+    frames.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
     let newest_frames: Vec<String> = frames.iter().take(12).map(|(_, n)| n.clone()).collect();
 
     let ffmpeg = parse_ffmpeg_progress(&read("ffmpeg.log"));
@@ -298,7 +307,11 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
         format!(
             "COLMAP 建圖中（已註冊 {} 張{}、{} 個三維點）",
             colmap.registered_images,
-            if colmap.registered_source == "model" { "" } else { "（日誌估算）" },
+            if colmap.registered_source == "model" {
+                ""
+            } else {
+                "（日誌估算）"
+            },
             colmap.points
         )
     } else if colmap.command.is_some() {
@@ -327,7 +340,12 @@ pub fn read_snapshot(project_dir: impl AsRef<Path>) -> MonitorSnapshot {
 /// 產生可自動刷新的展示頁（不依賴任何前端框架或伺服器）。
 ///
 /// `frames_href` 為影格目錄相對於 HTML 檔案的連結（例如 `frames`）。
-pub fn render_html(snap: &MonitorSnapshot, frames_href: &str, refresh_secs: u64, title: &str) -> String {
+pub fn render_html(
+    snap: &MonitorSnapshot,
+    frames_href: &str,
+    refresh_secs: u64,
+    title: &str,
+) -> String {
     let pct = |done: usize, total: usize| -> f64 {
         if total == 0 {
             0.0
@@ -349,7 +367,11 @@ pub fn render_html(snap: &MonitorSnapshot, frames_href: &str, refresh_secs: u64,
             "<figure><img loading=\"lazy\" src=\"{frames_href}/{f}\" alt=\"{f}\"><figcaption>{f}</figcaption></figure>"
         ));
     }
-    let colmap_stage = snap.colmap.command.clone().unwrap_or_else(|| "（尚未開始）".into());
+    let colmap_stage = snap
+        .colmap
+        .command
+        .clone()
+        .unwrap_or_else(|| "（尚未開始）".into());
     let ffmpeg_speed = snap
         .ffmpeg
         .speed
@@ -381,7 +403,10 @@ pub fn render_html(snap: &MonitorSnapshot, frames_href: &str, refresh_secs: u64,
     // 階段顯示以 final_ply 的存在為準（單一真相來源）：只要最終模型已產出，
     // 不論 snapshot 是何時建立的，畫面都必須顯示「完成」，避免顯示與資料不一致。
     let stage_display = match snap.final_ply {
-        Some(bytes) => format!("完成（final.ply 已產出，{:.1} MB）", bytes as f64 / 1048576.0),
+        Some(bytes) => format!(
+            "完成（final.ply 已產出，{:.1} MB）",
+            bytes as f64 / 1048576.0
+        ),
         None => snap.stage.clone(),
     };
 
@@ -439,13 +464,32 @@ pub fn render_html(snap: &MonitorSnapshot, frames_href: &str, refresh_secs: u64,
         refresh = refresh_secs.max(1),
         title = title,
         stage_display = stage_display,
-        ff_bar = bar("FFmpeg 抽幀", snap.ffmpeg.frames_reported.max(snap.frames_on_disk), snap.frames_on_disk.max(snap.ffmpeg.frames_reported), "張"),
-        match_bar = bar("COLMAP 匹配", snap.colmap.matching_done, snap.colmap.matching_total, "張"),
-        map_bar = bar("COLMAP 建圖（最佳重建）", snap.colmap.best_registered, snap.frames_on_disk.max(snap.colmap.best_registered), "張"),
+        ff_bar = bar(
+            "FFmpeg 抽幀",
+            snap.ffmpeg.frames_reported.max(snap.frames_on_disk),
+            snap.frames_on_disk.max(snap.ffmpeg.frames_reported),
+            "張"
+        ),
+        match_bar = bar(
+            "COLMAP 匹配",
+            snap.colmap.matching_done,
+            snap.colmap.matching_total,
+            "張"
+        ),
+        map_bar = bar(
+            "COLMAP 建圖（最佳重建）",
+            snap.colmap.best_registered,
+            snap.frames_on_disk.max(snap.colmap.best_registered),
+            "張"
+        ),
         frames = snap.frames_on_disk,
         ff_speed = ffmpeg_speed,
         registered = snap.colmap.registered_images,
-        reg_src = if snap.colmap.registered_source == "model" { "讀自模型" } else { "日誌估算" },
+        reg_src = if snap.colmap.registered_source == "model" {
+            "讀自模型"
+        } else {
+            "日誌估算"
+        },
         points = snap.colmap.points,
         snapshots = snap.colmap.snapshots,
         final_ply = final_ply,
@@ -508,7 +552,11 @@ Keeping successful reconstruction
 Elapsed time: 2.710 [minutes]
 ";
         let p = parse_colmap_progress(text);
-        assert_eq!(p.command.as_deref(), Some("mapper"), "應認得最後的階段是 mapper");
+        assert_eq!(
+            p.command.as_deref(),
+            Some("mapper"),
+            "應認得最後的階段是 mapper"
+        );
         assert_eq!(p.registered_images, 2, "應取最後的 num_reg_frames：{p:?}");
         assert_eq!(p.best_registered, 2, "{p:?}");
         assert_eq!(p.points, 2450, "應取最後一次的點數：{p:?}");
@@ -536,8 +584,14 @@ Elapsed time: 2.710 [minutes]
         }
         let p = parse_colmap_progress(&text);
         let line_count = text.matches("Registering image").count();
-        assert!(line_count > 500, "測試資料應包含大量重複行（實際 {line_count} 行）");
-        assert_eq!(p.registered_images, 15, "當前應為最後一次重建的 15 張：{p:?}");
+        assert!(
+            line_count > 500,
+            "測試資料應包含大量重複行（實際 {line_count} 行）"
+        );
+        assert_eq!(
+            p.registered_images, 15,
+            "當前應為最後一次重建的 15 張：{p:?}"
+        );
         assert_eq!(p.best_registered, 15, "最佳應為最大的一次（15 張）：{p:?}");
         assert!(
             p.best_registered < line_count / 10,
@@ -610,7 +664,11 @@ arguments:
             stage: "COLMAP 建圖中（已註冊 2 張、2450 個三維點）".into(),
             frames_on_disk: 273,
             newest_frames: vec!["frame_0001.jpg".into(), "frame_0002.jpg".into()],
-            ffmpeg: FfmpegProgress { frames_reported: 273, speed: Some(61.8), finished: true },
+            ffmpeg: FfmpegProgress {
+                frames_reported: 273,
+                speed: Some(61.8),
+                finished: true,
+            },
             colmap: ColmapProgress {
                 command: Some("mapper".into()),
                 feature_images: 273,
@@ -624,7 +682,13 @@ arguments:
                 best_points: 2450,
                 snapshots: 3,
             },
-            brush: BrushProgress { total_steps: Some(8000), max_resolution: Some(1200), running: false, elapsed_ms: None, produced_model: false },
+            brush: BrushProgress {
+                total_steps: Some(8000),
+                max_resolution: Some(1200),
+                running: false,
+                elapsed_ms: None,
+                produced_model: false,
+            },
             final_ply: None,
         };
         let html = render_html(&snap, "../work/frames", 3, "MacauSplat 即時監視");

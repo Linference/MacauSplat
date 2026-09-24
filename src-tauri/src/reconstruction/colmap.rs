@@ -88,7 +88,10 @@ impl CameraModel {
     pub fn is_fisheye(self) -> bool {
         matches!(
             self,
-            Self::OpenCvFisheye | Self::SimpleRadialFisheye | Self::RadialFisheye | Self::ThinPrismFisheye
+            Self::OpenCvFisheye
+                | Self::SimpleRadialFisheye
+                | Self::RadialFisheye
+                | Self::ThinPrismFisheye
         )
     }
 }
@@ -108,10 +111,11 @@ impl Camera {
     pub fn intrinsics(&self) -> (f64, f64, f64, f64) {
         let p = &self.params;
         match self.model {
-            CameraModel::SimplePinhole | CameraModel::SimpleRadial | CameraModel::Radial
-            | CameraModel::SimpleRadialFisheye | CameraModel::RadialFisheye => {
-                (p[0], p[0], p[1], p[2])
-            }
+            CameraModel::SimplePinhole
+            | CameraModel::SimpleRadial
+            | CameraModel::Radial
+            | CameraModel::SimpleRadialFisheye
+            | CameraModel::RadialFisheye => (p[0], p[0], p[1], p[2]),
             _ => (p[0], p[1], p[2], p[3]),
         }
     }
@@ -122,7 +126,9 @@ impl Camera {
         match self.model {
             CameraModel::SimpleRadial | CameraModel::SimpleRadialFisheye => (p[3], 0.0),
             CameraModel::Radial | CameraModel::RadialFisheye => (p[3], p[4]),
-            CameraModel::OpenCv | CameraModel::FullOpenCv | CameraModel::OpenCvFisheye => (p[4], p[5]),
+            CameraModel::OpenCv | CameraModel::FullOpenCv | CameraModel::OpenCvFisheye => {
+                (p[4], p[5])
+            }
             _ => (0.0, 0.0),
         }
     }
@@ -232,12 +238,19 @@ impl SparseReconstruction {
         } else {
             Vec::new()
         };
-        Ok(Self { cameras, images, points })
+        Ok(Self {
+            cameras,
+            images,
+            points,
+        })
     }
 
     /// 名稱 → 影格的查表（用來把 `frames/` 的檔案對到姿態）。
     pub fn images_by_name(&self) -> HashMap<String, &Image> {
-        self.images.iter().map(|i| (normalize_name(&i.name), i)).collect()
+        self.images
+            .iter()
+            .map(|i| (normalize_name(&i.name), i))
+            .collect()
     }
 
     /// 是否具備可用的點雲（供自動擬合包圍盒）。
@@ -276,15 +289,20 @@ struct Reader {
 
 impl Reader {
     fn open(path: &Path) -> Result<Self, ColmapError> {
-        Ok(Self { inner: BufReader::new(File::open(path)?), path: path.to_path_buf() })
+        Ok(Self {
+            inner: BufReader::new(File::open(path)?),
+            path: path.to_path_buf(),
+        })
     }
 
     fn take<const N: usize>(&mut self) -> Result<[u8; N], ColmapError> {
         let mut buf = [0u8; N];
-        self.inner.read_exact(&mut buf).map_err(|e| ColmapError::Format {
-            file: self.path.display().to_string(),
-            detail: format!("讀取 {N} 位元組失敗（檔案可能被截斷）：{e}"),
-        })?;
+        self.inner
+            .read_exact(&mut buf)
+            .map_err(|e| ColmapError::Format {
+                file: self.path.display().to_string(),
+                detail: format!("讀取 {N} 位元組失敗（檔案可能被截斷）：{e}"),
+            })?;
         Ok(buf)
     }
 
@@ -340,14 +358,24 @@ pub fn read_cameras_bin(path: &Path) -> Result<HashMap<u32, Camera>, ColmapError
     for _ in 0..num {
         let id = r.u32()?;
         let model_id = r.i32()?;
-        let model = CameraModel::from_id(model_id).ok_or(ColmapError::UnsupportedCameraModel(model_id))?;
+        let model =
+            CameraModel::from_id(model_id).ok_or(ColmapError::UnsupportedCameraModel(model_id))?;
         let width = r.u64()?;
         let height = r.u64()?;
         let mut params = Vec::with_capacity(model.num_params());
         for _ in 0..model.num_params() {
             params.push(r.f64()?);
         }
-        out.insert(id, Camera { id, model, width, height, params });
+        out.insert(
+            id,
+            Camera {
+                id,
+                model,
+                width,
+                height,
+                params,
+            },
+        );
     }
     Ok(out)
 }
@@ -377,7 +405,14 @@ pub fn read_images_bin(path: &Path) -> Result<Vec<Image>, ColmapError> {
             let pid = r.i64()?;
             points2d.push((x, y, pid));
         }
-        out.push(Image { id, qvec, tvec, camera_id, name, points2d });
+        out.push(Image {
+            id,
+            qvec,
+            tvec,
+            camera_id,
+            name,
+            points2d,
+        });
     }
     Ok(out)
 }
@@ -402,7 +437,13 @@ pub fn read_points3d_bin(path: &Path) -> Result<Vec<Point3D>, ColmapError> {
             let point2d_idx = r.u32()?;
             track.push((image_id, point2d_idx));
         }
-        out.push(Point3D { id, xyz, rgb, error, track });
+        out.push(Point3D {
+            id,
+            xyz,
+            rgb,
+            error,
+            track,
+        });
     }
     Ok(out)
 }
@@ -417,9 +458,21 @@ pub fn quaternion_to_rotation(q: &[f64; 4]) -> [[f64; 3]; 3] {
     }
     let (w, x, y, z) = (w / n, x / n, y / n, z / n);
     [
-        [1.0 - 2.0 * y * y - 2.0 * z * z, 2.0 * x * y - 2.0 * z * w, 2.0 * x * z + 2.0 * y * w],
-        [2.0 * x * y + 2.0 * z * w, 1.0 - 2.0 * x * x - 2.0 * z * z, 2.0 * y * z - 2.0 * x * w],
-        [2.0 * x * z - 2.0 * y * w, 2.0 * y * z + 2.0 * x * w, 1.0 - 2.0 * x * x - 2.0 * y * y],
+        [
+            1.0 - 2.0 * y * y - 2.0 * z * z,
+            2.0 * x * y - 2.0 * z * w,
+            2.0 * x * z + 2.0 * y * w,
+        ],
+        [
+            2.0 * x * y + 2.0 * z * w,
+            1.0 - 2.0 * x * x - 2.0 * z * z,
+            2.0 * y * z - 2.0 * x * w,
+        ],
+        [
+            2.0 * x * z - 2.0 * y * w,
+            2.0 * y * z + 2.0 * x * w,
+            1.0 - 2.0 * x * x - 2.0 * y * y,
+        ],
     ]
 }
 
@@ -472,7 +525,10 @@ mod tests {
         let identity = quaternion_to_rotation(&[1.0, 0.0, 0.0, 0.0]);
         for (i, row) in identity.iter().enumerate() {
             for (j, v) in row.iter().enumerate() {
-                assert!((v - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12, "identity 錯誤於 ({i},{j})");
+                assert!(
+                    (v - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12,
+                    "identity 錯誤於 ({i},{j})"
+                );
             }
         }
         // 繞 Z 軸 +90°：(x,y) → (-y,x)。四元數為 (cos(θ/2), 0, 0, sin(θ/2))，θ=90° → θ/2=45°
@@ -481,7 +537,10 @@ mod tests {
         let p = [1.0, 0.0, 0.0];
         let x = rot[0][0] * p[0] + rot[0][1] * p[1] + rot[0][2] * p[2];
         let y = rot[1][0] * p[0] + rot[1][1] * p[1] + rot[1][2] * p[2];
-        assert!(x.abs() < 1e-9 && (y - 1.0).abs() < 1e-9, "繞 Z 軸旋轉結果錯誤：({x}, {y})");
+        assert!(
+            x.abs() < 1e-9 && (y - 1.0).abs() < 1e-9,
+            "繞 Z 軸旋轉結果錯誤：({x}, {y})"
+        );
     }
 
     /// 相機在正面 5 公尺、朝 +Z 時，畫面中心的點應投影到 (cx, cy)。
@@ -520,7 +579,9 @@ mod tests {
             points2d: vec![],
         };
         let c = image.camera_center();
-        assert!((c[0] + 1.0).abs() < 1e-12 && (c[1] + 2.0).abs() < 1e-12 && (c[2] + 3.0).abs() < 1e-12);
+        assert!(
+            (c[0] + 1.0).abs() < 1e-12 && (c[1] + 2.0).abs() < 1e-12 && (c[2] + 3.0).abs() < 1e-12
+        );
         image.tvec = [0.0, 0.0, 0.0];
         let c = image.camera_center();
         assert!(c.iter().all(|v| v.abs() < 1e-12));
@@ -537,10 +598,10 @@ mod tests {
         // cameras.bin：1 台 PINHOLE（fx, fy, cx, cy）
         let mut f = File::create(&cam_path).unwrap();
         f.write_all(&1u64.to_le_bytes()).unwrap();
-        f.write_all(&7u32.to_le_bytes()).unwrap();      // camera_id
-        f.write_all(&1i32.to_le_bytes()).unwrap();      // model_id = PINHOLE
-        f.write_all(&1920u64.to_le_bytes()).unwrap();   // width
-        f.write_all(&1080u64.to_le_bytes()).unwrap();   // height
+        f.write_all(&7u32.to_le_bytes()).unwrap(); // camera_id
+        f.write_all(&1i32.to_le_bytes()).unwrap(); // model_id = PINHOLE
+        f.write_all(&1920u64.to_le_bytes()).unwrap(); // width
+        f.write_all(&1080u64.to_le_bytes()).unwrap(); // height
         for v in [1000.0f64, 1000.0, 960.0, 540.0] {
             f.write_all(&v.to_le_bytes()).unwrap();
         }
@@ -549,14 +610,14 @@ mod tests {
         // images.bin：1 張影格，2 個 2D 點（其中一個 point3D_id = -1）
         let mut f = File::create(&img_path).unwrap();
         f.write_all(&1u64.to_le_bytes()).unwrap();
-        f.write_all(&3u32.to_le_bytes()).unwrap();      // image_id
+        f.write_all(&3u32.to_le_bytes()).unwrap(); // image_id
         for v in [1.0f64, 0.0, 0.0, 0.0] {
             f.write_all(&v.to_le_bytes()).unwrap();
         }
         for v in [0.1f64, 0.2, 0.3] {
             f.write_all(&v.to_le_bytes()).unwrap();
         }
-        f.write_all(&7u32.to_le_bytes()).unwrap();      // camera_id
+        f.write_all(&7u32.to_le_bytes()).unwrap(); // camera_id
         f.write_all(b"frame_0001.jpg\0").unwrap();
         f.write_all(&2u64.to_le_bytes()).unwrap();
         f.write_all(&12.5f64.to_le_bytes()).unwrap();
@@ -614,10 +675,13 @@ mod tests {
     fn truncated_file_reports_error() {
         let path = temp_path("truncated.bin");
         let mut f = File::create(&path).unwrap();
-        f.write_all(&2u64.to_le_bytes()).unwrap();  // 聲稱有 2 台相機，但後面沒資料
+        f.write_all(&2u64.to_le_bytes()).unwrap(); // 聲稱有 2 台相機，但後面沒資料
         drop(f);
         let err = read_cameras_bin(&path).expect_err("應報錯");
-        assert!(matches!(err, ColmapError::Format { .. }), "錯誤型別應為 Format，實際：{err:?}");
+        assert!(
+            matches!(err, ColmapError::Format { .. }),
+            "錯誤型別應為 Format，實際：{err:?}"
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -158,42 +158,94 @@ mod tests {
     }
 
     fn as_strings(args: &[OsString]) -> Vec<String> {
-        args.iter().map(|a| a.to_string_lossy().to_string()).collect()
+        args.iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
     }
 
     /// 預設（非展示）：不得出現任何 viewer／rerun 旗標，否則無頭環境會直接失敗。
     #[test]
     fn default_args_have_no_viewer_flags() {
-        let args = build_train_args(preset(), Path::new("out"), Path::new("dataset"), false, false);
+        let args = build_train_args(
+            preset(),
+            Path::new("out"),
+            Path::new("dataset"),
+            false,
+            false,
+        );
         let s = as_strings(&args);
-        assert!(!s.iter().any(|a| a.contains("viewer")), "不應含 viewer：{s:?}");
-        assert!(!s.iter().any(|a| a.contains("rerun")), "不應含 rerun：{s:?}");
+        assert!(
+            !s.iter().any(|a| a.contains("viewer")),
+            "不應含 viewer：{s:?}"
+        );
+        assert!(
+            !s.iter().any(|a| a.contains("rerun")),
+            "不應含 rerun：{s:?}"
+        );
         // 既有參數必須完整保留
-        for expected in ["--total-steps", "--max-resolution", "--export-every", "--export-path", "--export-name"] {
-            assert!(s.contains(&expected.to_string()), "缺少必要參數 {expected}：{s:?}");
+        for expected in [
+            "--total-steps",
+            "--max-resolution",
+            "--export-every",
+            "--export-path",
+            "--export-name",
+        ] {
+            assert!(
+                s.contains(&expected.to_string()),
+                "缺少必要參數 {expected}：{s:?}"
+            );
         }
-        assert_eq!(s.last().map(String::as_str), Some("dataset"), "資料集路徑應在最後：{s:?}");
+        assert_eq!(
+            s.last().map(String::as_str),
+            Some("dataset"),
+            "資料集路徑應在最後：{s:?}"
+        );
     }
 
     /// 展示模式：必須附上 `--with-viewer`，且仍保留全部既有參數。
     #[test]
     fn viewer_flag_is_appended_for_demo_mode() {
-        let args = build_train_args(preset(), Path::new("out"), Path::new("dataset"), true, false);
+        let args = build_train_args(
+            preset(),
+            Path::new("out"),
+            Path::new("dataset"),
+            true,
+            false,
+        );
         let s = as_strings(&args);
-        assert!(s.contains(&"--with-viewer".to_string()), "應含 --with-viewer：{s:?}");
+        assert!(
+            s.contains(&"--with-viewer".to_string()),
+            "應含 --with-viewer：{s:?}"
+        );
         assert!(s.contains(&"--total-steps".to_string()));
-        assert_eq!(s.last().map(String::as_str), Some("dataset"), "旗標必須在資料集路徑之前：{s:?}");
+        assert_eq!(
+            s.last().map(String::as_str),
+            Some("dataset"),
+            "旗標必須在資料集路徑之前：{s:?}"
+        );
     }
 
     /// rerun：附上啟用與取樣間隔參數（點雲間隔須比統計間隔大，避免拖慢訓練）。
     #[test]
     fn rerun_flags_include_sampling_intervals() {
-        let args = build_train_args(preset(), Path::new("out"), Path::new("dataset"), false, true);
+        let args = build_train_args(
+            preset(),
+            Path::new("out"),
+            Path::new("dataset"),
+            false,
+            true,
+        );
         let s = as_strings(&args);
-        assert!(s.contains(&"--rerun-enabled".to_string()), "應含 --rerun-enabled：{s:?}");
+        assert!(
+            s.contains(&"--rerun-enabled".to_string()),
+            "應含 --rerun-enabled：{s:?}"
+        );
         let stats = s.iter().position(|a| a == "--rerun-log-train-stats-every");
         let splats = s.iter().position(|a| a == "--rerun-log-splats-every");
-        assert!(stats.is_some() && splats.is_some(), "應含兩個取樣間隔：{s:?}");
+        assert!(
+            stats.is_some() && splats.is_some(),
+            "應含兩個取樣間隔：{s:?}"
+        );
         let stats_every: u32 = s[stats.unwrap() + 1].parse().expect("間隔應為數字");
         let splats_every: u32 = s[splats.unwrap() + 1].parse().expect("間隔應為數字");
         assert!(
@@ -220,7 +272,11 @@ mod tests {
             } else {
                 std::env::set_var("MACAU_SPLAT_TRAIN_VIEWER", value);
             }
-            assert_eq!(demo_viewer_enabled(), expected, "值 {value:?} 的判定不符預期");
+            assert_eq!(
+                demo_viewer_enabled(),
+                expected,
+                "值 {value:?} 的判定不符預期"
+            );
         }
         std::env::remove_var("MACAU_SPLAT_TRAIN_VIEWER");
         assert!(!demo_viewer_enabled(), "測試結束後應為關閉狀態");

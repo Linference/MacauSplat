@@ -1,12 +1,17 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "resources": {
       "../engines/manifest.json": "engines/manifest.json",
       "../engines/ffmpeg/": "engines/ffmpeg/",
       "../engines/colmap/": "engines/colmap/",
       "../engines/brush/": "engines/brush/"
-    }
+    },
+    "externalBin": [
+      "binaries/splatstudio"
+    ]
   }
 }

@@ -5,18 +5,29 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb"],
+    "targets": [
+      "deb"
+    ],
     "resources": {
       "../engines/manifest.linux.json": "engines/manifest.linux.json",
       "../engines/linux/brush/": "engines/linux/brush/"
     },
     "linux": {
       "deb": {
-        "depends": ["ffmpeg", "colmap"],
-        "recommends": ["libvulkan1", "mesa-vulkan-drivers"],
+        "depends": [
+          "ffmpeg",
+          "colmap"
+        ],
+        "recommends": [
+          "libvulkan1",
+          "mesa-vulkan-drivers"
+        ],
         "section": "graphics",
         "priority": "optional"
       }
-    }
+    },
+    "externalBin": [
+      "binaries/splatstudio"
+    ]
   }
 }

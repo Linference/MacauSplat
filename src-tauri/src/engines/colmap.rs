@@ -325,7 +325,9 @@ pub async fn map(
     // 這是 COLMAP 內建選項（--Mapper.snapshot_path / snapshot_images_freq）；
     // 舊版可能沒有，因此先問 help，不支援就靜默略過，不影響重建本身。
     if let Some(snapshot_dir) = snapshot_directory(output) {
-        if let Ok(true) = colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path").await {
+        if let Ok(true) =
+            colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path").await
+        {
             let _ = tokio::fs::create_dir_all(&snapshot_dir).await;
             args.push("--Mapper.snapshot_path".into());
             args.push(snapshot_dir.clone().into());

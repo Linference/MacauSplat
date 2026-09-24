@@ -22,7 +22,11 @@ pub struct Bounds3 {
 
 impl Bounds3 {
     pub fn size(&self) -> [f64; 3] {
-        [self.max[0] - self.min[0], self.max[1] - self.min[1], self.max[2] - self.min[2]]
+        [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ]
     }
 
     pub fn center(&self) -> [f64; 3] {
@@ -73,18 +77,24 @@ pub struct ProjectAudit {
 }
 
 fn classify_quality(project: &serde_json::Value) -> Option<String> {
-    project.get("quality").and_then(|v| v.as_str()).map(str::to_string)
+    project
+        .get("quality")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// 掃描專案並產生審計報告。
-pub fn audit_project(project_dir: impl AsRef<Path>) -> Result<ProjectAudit, super::colmap::ColmapError> {
+pub fn audit_project(
+    project_dir: impl AsRef<Path>,
+) -> Result<ProjectAudit, super::colmap::ColmapError> {
     let project_dir = project_dir.as_ref().to_path_buf();
     let mut blockers = Vec::new();
 
     // 專案中介資料（可能不存在；不視為致命）
     let project_json = std::fs::read_to_string(project_dir.join("project.json")).ok();
-    let project_value: Option<serde_json::Value> =
-        project_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    let project_value: Option<serde_json::Value> = project_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
 
     // 影格：優先 work/frames，其次 source/images
     let frames_dir = ["work/frames", "frames", "source/images"]
@@ -110,8 +120,11 @@ pub fn audit_project(project_dir: impl AsRef<Path>) -> Result<ProjectAudit, supe
 
     let frame_set: std::collections::HashSet<String> =
         frame_names.iter().map(|n| normalize_name(n)).collect();
-    let registered_names: Vec<String> =
-        reconstruction.images.iter().map(|i| normalize_name(&i.name)).collect();
+    let registered_names: Vec<String> = reconstruction
+        .images
+        .iter()
+        .map(|i| normalize_name(&i.name))
+        .collect();
     let missing_files: Vec<String> = registered_names
         .iter()
         .filter(|n| !frame_set.contains(*n))
@@ -145,7 +158,11 @@ pub fn audit_project(project_dir: impl AsRef<Path>) -> Result<ProjectAudit, supe
     cameras.sort_by_key(|c| c.camera_id);
 
     // 點雲統計
-    let mut tracks: Vec<usize> = reconstruction.points.iter().map(|p| p.track.len()).collect();
+    let mut tracks: Vec<usize> = reconstruction
+        .points
+        .iter()
+        .map(|p| p.track.len())
+        .collect();
     tracks.sort_unstable();
     let median_track = if tracks.is_empty() {
         0.0
@@ -237,13 +254,24 @@ mod tests {
     ///
     /// `frames` 張影格；`registered` 張進入 COLMAP（`registered < frames` 可模擬低註冊率）；
     /// `name_offset` 可讓 COLMAP 記錄的檔名與磁碟不同（模擬不同步）。
-    fn make_project(tag: &str, frames: usize, registered: usize, with_points: bool, name_offset: bool) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("macausplat-audit-{}-{}", std::process::id(), tag));
+    fn make_project(
+        tag: &str,
+        frames: usize,
+        registered: usize,
+        with_points: bool,
+        name_offset: bool,
+    ) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("macausplat-audit-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("work/frames")).unwrap();
         fs::create_dir_all(dir.join("work/colmap")).unwrap();
         for i in 0..frames {
-            fs::write(dir.join("work/frames").join(format!("frame_{i:04}.jpg")), b"x").unwrap();
+            fs::write(
+                dir.join("work/frames").join(format!("frame_{i:04}.jpg")),
+                b"x",
+            )
+            .unwrap();
         }
         fs::write(
             dir.join("project.json"),
@@ -317,7 +345,11 @@ mod tests {
         assert_eq!(a.cameras[0].registered_images, 24);
         assert_eq!(a.points, 2);
         assert!(a.point_bounds.is_some());
-        assert!(a.ready_for_annotation, "應可用於標註；blockers={:?}", a.blockers);
+        assert!(
+            a.ready_for_annotation,
+            "應可用於標註；blockers={:?}",
+            a.blockers
+        );
         assert!(a.blockers.is_empty(), "不應有 blocker：{:?}", a.blockers);
         assert_eq!(a.project_name.as_deref(), Some("demo"));
         assert_eq!(a.quality.as_deref(), Some("balanced"));
@@ -368,7 +400,10 @@ mod tests {
         let a = audit_project(&dir).expect("審計應成功");
         assert!(a.registration_ratio > 0.9);
         assert!(!a.ready_for_annotation, "影格數不足時不應判為可用");
-        assert!(a.blockers.iter().any(|b| b.contains("不足以構成訓練資料集")));
+        assert!(a
+            .blockers
+            .iter()
+            .any(|b| b.contains("不足以構成訓練資料集")));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -377,7 +412,10 @@ mod tests {
         // 24 張影格、24 張註冊，但最後一張 COLMAP 記錄的是磁碟上沒有的檔名
         let dir = make_project("mismatch", 24, 24, true, true);
         let a = audit_project(&dir).expect("審計應成功");
-        assert_eq!(a.missing_files, vec!["registered_only_0023.jpg".to_string()]);
+        assert_eq!(
+            a.missing_files,
+            vec!["registered_only_0023.jpg".to_string()]
+        );
         assert_eq!(a.unregistered_frames, 1);
         let _ = fs::remove_dir_all(dir);
     }

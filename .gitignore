@@ -27,3 +27,6 @@ engines/linux/brush/**
 !engines/linux/brush/README.md
 engines/macos/arm64/**
 !engines/macos/arm64/README.md
+
+# externalBin 的暫存位置（由 npm run stage:cli 產生）。
+src-tauri/binaries/

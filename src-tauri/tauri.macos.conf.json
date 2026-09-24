@@ -1,7 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "resources": {
       "../engines/manifest.macos.json": "engines/manifest.macos.json",
       "../engines/macos/arm64/": "engines/macos/arm64/"
@@ -10,6 +13,9 @@
       "frameworks": [],
       "minimumSystemVersion": "15.0",
       "signingIdentity": null
-    }
+    },
+    "externalBin": [
+      "binaries/splatstudio"
+    ]
   }
 }

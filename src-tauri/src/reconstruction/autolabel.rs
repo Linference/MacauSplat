@@ -63,12 +63,12 @@ impl Box3D {
         for sx in [-0.5, 0.5] {
             for sy in [-0.5, 0.5] {
                 for sz in [-0.5, 0.5] {
-                    let mut p = self.center;
-                    for k in 0..3 {
-                        p[k] += self.axes[0][k] * self.size[0] * sx
+                    let p = std::array::from_fn(|k| {
+                        self.center[k]
+                            + self.axes[0][k] * self.size[0] * sx
                             + self.axes[1][k] * self.size[1] * sy
-                            + self.axes[2][k] * self.size[2] * sz;
-                    }
+                            + self.axes[2][k] * self.size[2] * sz
+                    });
                     out[i] = p;
                     i += 1;
                 }
@@ -85,10 +85,12 @@ impl Box3D {
     /// 點是否落在盒內。
     pub fn contains(&self, p: [f64; 3]) -> bool {
         for axis in 0..3 {
-            let mut d = 0.0;
-            for k in 0..3 {
-                d += (p[k] - self.center[k]) * self.axes[axis][k];
-            }
+            let d: f64 = p
+                .iter()
+                .zip(self.center.iter())
+                .zip(self.axes[axis].iter())
+                .map(|((pk, ck), ak)| (pk - ck) * ak)
+                .sum();
             if d.abs() > self.size[axis] / 2.0 {
                 return false;
             }
@@ -110,7 +112,11 @@ pub struct FitOptions {
 
 impl Default for FitOptions {
     fn default() -> Self {
-        Self { trim: 0.02, infer_up: true, min_extent: 0.2 }
+        Self {
+            trim: 0.02,
+            infer_up: true,
+            min_extent: 0.2,
+        }
     }
 }
 
@@ -162,20 +168,13 @@ pub fn infer_up_axis(images: &[Image]) -> ([f64; 3], bool) {
         v = [next[0] / norm, next[1] / norm, next[2] / norm];
     }
     // 檢查軌跡是否真的接近一個平面：若三個方向變異量接近，代表軌跡是三維分散的，上軸不可靠
-    let mut eig = [0.0f64; 3];
-    for i in 0..3 {
-        let mut mv = [0.0; 3];
-        for (a, row) in cov.iter().enumerate() {
-            for (b, val) in row.iter().enumerate() {
-                mv[a] += val * v[b];
-            }
-        }
-        eig[i] = v[0] * mv[0] + v[1] * mv[1] + v[2] * mv[2];
-        if i == 0 {
-            break;
-        }
-    }
-    let smallest = eig[0].max(0.0);
+    // 只取最小特徵值方向（v）上的變異量：v^T · cov · v
+    let mv = [
+        cov[0][0] * v[0] + cov[0][1] * v[1] + cov[0][2] * v[2],
+        cov[1][0] * v[0] + cov[1][1] * v[1] + cov[1][2] * v[2],
+        cov[2][0] * v[0] + cov[2][1] * v[1] + cov[2][2] * v[2],
+    ];
+    let smallest = (v[0] * mv[0] + v[1] * mv[1] + v[2] * mv[2]).max(0.0);
     let total = trace.max(1e-12);
     // 最小方向的變異若超過總變異的 1/6，表示軌跡不夠「平」，上軸不可靠
     if smallest / total > 0.17 {
@@ -200,7 +199,11 @@ pub fn fit_box_from_points(
 }
 
 /// 由座標陣列擬合（便於測試與外部重用）。
-pub fn fit_box_from_xyz(points: &[[f64; 3]], images: &[Image], options: &FitOptions) -> Option<Box3D> {
+pub fn fit_box_from_xyz(
+    points: &[[f64; 3]],
+    images: &[Image],
+    options: &FitOptions,
+) -> Option<Box3D> {
     if points.len() < 8 {
         return None;
     }
@@ -210,7 +213,11 @@ pub fn fit_box_from_xyz(points: &[[f64; 3]], images: &[Image], options: &FitOpti
         ([0.0, 1.0, 0.0], true)
     };
     // 建立與 up 正交的基底 (e1, e2)
-    let helper = if up[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] };
+    let helper = if up[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
     let mut e1 = cross(helper, up);
     normalize(&mut e1);
     let mut e2 = cross(up, e1);
@@ -379,17 +386,14 @@ pub fn annotate_frame(
     let mut max_v = f64::NEG_INFINITY;
     let mut visible = 0usize;
     for corner in box3d.corners() {
-        match camera_to_pixel(image.to_camera(corner), camera) {
-            Some((u, v, _z)) => {
-                if u >= -0.01 * w && u <= 1.01 * w && v >= -0.01 * h && v <= 1.01 * h {
-                    visible += 1;
-                }
-                min_u = min_u.min(u);
-                min_v = min_v.min(v);
-                max_u = max_u.max(u);
-                max_v = max_v.max(v);
+        if let Some((u, v, _z)) = camera_to_pixel(image.to_camera(corner), camera) {
+            if u >= -0.01 * w && u <= 1.01 * w && v >= -0.01 * h && v <= 1.01 * h {
+                visible += 1;
             }
-            None => {}
+            min_u = min_u.min(u);
+            min_v = min_v.min(v);
+            max_u = max_u.max(u);
+            max_v = max_v.max(v);
         }
     }
     if !min_u.is_finite() {
@@ -419,11 +423,17 @@ pub fn annotate_frame(
             "嚴格模式要求 8 個角點全可見，此影格僅 {visible} 個（框可能低估輪廓）"
         ));
     } else if visible < options.min_visible_corners {
-        reason = Some(format!("可見角點僅 {visible} 個（需 ≥{}）", options.min_visible_corners));
+        reason = Some(format!(
+            "可見角點僅 {visible} 個（需 ≥{}）",
+            options.min_visible_corners
+        ));
     } else if area_ratio < options.min_area_ratio {
         reason = Some(format!("投影框過小（{:.1}% 畫面）", area_ratio * 100.0));
     } else if area_ratio > options.max_area_ratio {
-        reason = Some(format!("投影框過大（{:.1}% 畫面，可能相機貼太近）", area_ratio * 100.0));
+        reason = Some(format!(
+            "投影框過大（{:.1}% 畫面，可能相機貼太近）",
+            area_ratio * 100.0
+        ));
     } else if observed_points < options.min_observed_points {
         reason = Some(format!(
             "此影格觀測到的盒內點僅 {observed_points} 個（可能被遮擋）"
@@ -432,14 +442,7 @@ pub fn annotate_frame(
     let accepted = reason.is_none();
     FrameAnnotation {
         frame: image.name.clone(),
-        yolo: accepted.then(|| {
-            [
-                ((x0 + x1) / 2.0) / w,
-                ((y0 + y1) / 2.0) / h,
-                bw / w,
-                bh / h,
-            ]
-        }),
+        yolo: accepted.then(|| [((x0 + x1) / 2.0) / w, ((y0 + y1) / 2.0) / h, bw / w, bh / h]),
         pixel: accepted.then_some([x0, y0, x1, y1]),
         visible_corners: visible,
         area_ratio,
@@ -527,14 +530,24 @@ pub fn summarize(annotations: &[FrameAnnotation]) -> AnnotationSummary {
         *reasons.entry(key).or_insert(0) += 1;
     }
     let mut rejection_reasons: Vec<(String, usize)> = reasons.into_iter().collect();
-    rejection_reasons.sort_by(|a, b| b.1.cmp(&a.1));
+    rejection_reasons.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     AnnotationSummary {
         frames_total: total,
         frames_accepted: accepted,
-        acceptance_ratio: if total == 0 { 0.0 } else { accepted as f64 / total as f64 },
-        median_visible_corners: med(annotations.iter().map(|a| a.visible_corners as f64).collect()),
+        acceptance_ratio: if total == 0 {
+            0.0
+        } else {
+            accepted as f64 / total as f64
+        },
+        median_visible_corners: med(annotations
+            .iter()
+            .map(|a| a.visible_corners as f64)
+            .collect()),
         median_area_ratio: med(annotations.iter().map(|a| a.area_ratio).collect()),
-        median_observed_points: med(annotations.iter().map(|a| a.observed_points as f64).collect()),
+        median_observed_points: med(annotations
+            .iter()
+            .map(|a| a.observed_points as f64)
+            .collect()),
         rejection_reasons,
     }
 }
@@ -554,7 +567,10 @@ pub fn write_yolo_labels(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| a.frame.clone());
-        let line = format!("{class_id} {:.6} {:.6} {:.6} {:.6}\n", y[0], y[1], y[2], y[3]);
+        let line = format!(
+            "{class_id} {:.6} {:.6} {:.6} {:.6}\n",
+            y[0], y[1], y[2], y[3]
+        );
         std::fs::write(dir.join(format!("{stem}.txt")), line)?;
         written += 1;
     }
@@ -562,8 +578,13 @@ pub fn write_yolo_labels(
 }
 
 /// 寫出逐影格的標註明細（CSV，方便用試算表檢查）。
-pub fn write_annotations_csv(path: impl AsRef<Path>, annotations: &[FrameAnnotation]) -> std::io::Result<()> {
-    let mut out = String::from("frame,accepted,cx,cy,w,h,x0,y0,x1,y1,visible_corners,area_ratio,observed_points,reason\n");
+pub fn write_annotations_csv(
+    path: impl AsRef<Path>,
+    annotations: &[FrameAnnotation],
+) -> std::io::Result<()> {
+    let mut out = String::from(
+        "frame,accepted,cx,cy,w,h,x0,y0,x1,y1,visible_corners,area_ratio,observed_points,reason\n",
+    );
     for a in annotations {
         let y = a.yolo.unwrap_or([f64::NAN; 4]);
         let p = a.pixel.unwrap_or([f64::NAN; 4]);
@@ -649,7 +670,9 @@ pub fn write_qa_html(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| a.frame.clone());
         html.push_str("<div class=\"cell\"><div class=\"wrap\">");
-        html.push_str(&format!("<img loading=\"lazy\" src=\"{frames_dir}/{name}\" alt=\"{name}\">"));
+        html.push_str(&format!(
+            "<img loading=\"lazy\" src=\"{frames_dir}/{name}\" alt=\"{name}\">"
+        ));
         // 框的位置：YOLO 的 (cx, cy, w, h) 本來就是相對畫面比例，直接當 CSS 百分比用即可，
         // 不需要任何影像程式庫，也不需要在瀏覽器端重算。
         if let Some(y) = a.yolo {
@@ -725,7 +748,11 @@ mod tests {
             (px[0] - expect).abs() < 1.0 && (px[2] - (1000.0 - expect)).abs() < 1.0,
             "框位置錯誤（應為近面投影 {expect:.1}）：{px:?}"
         );
-        assert!((a.area_ratio - 0.0493).abs() < 0.005, "面積比應約 4.9%，實際 {}", a.area_ratio);
+        assert!(
+            (a.area_ratio - 0.0493).abs() < 0.005,
+            "面積比應約 4.9%，實際 {}",
+            a.area_ratio
+        );
         let y = a.yolo.unwrap();
         assert!((y[0] - 0.5).abs() < 0.01, "YOLO 中心應在畫面中央：{y:?}");
     }
@@ -761,7 +788,10 @@ mod tests {
         };
         let far = Box3D::axis_aligned([0.0, 0.0, 5000.0], [2.0, 2.0, 2.0]);
         let a = annotate_frame(&image, &camera(), &far, &AnnotateOptions::default(), 10);
-        assert!(!a.accepted && a.reason.as_deref().unwrap().contains("過小"), "{a:?}");
+        assert!(
+            !a.accepted && a.reason.as_deref().unwrap().contains("過小"),
+            "{a:?}"
+        );
 
         // 「過大」的測法：盒子必須完整落在視錐內（8 個角都可見），但投影後佔滿畫面。
         // f=1000、畫面 1000px ⇒ 半視角 26.6°；邊長 8 的盒子放在 z=12.2 時，
@@ -769,13 +799,19 @@ mod tests {
         let near = Box3D::axis_aligned([0.0, 0.0, 12.2], [8.0, 8.0, 8.0]);
         let a = annotate_frame(&image, &camera(), &near, &AnnotateOptions::default(), 10);
         assert_eq!(a.visible_corners, 8, "8 個角都應在畫面內：{a:?}");
-        assert!(!a.accepted && a.reason.as_deref().unwrap().contains("過大"), "{a:?}");
+        assert!(
+            !a.accepted && a.reason.as_deref().unwrap().contains("過大"),
+            "{a:?}"
+        );
 
         // 反之，若盒子大到角點全部跑出畫面／跑到相機後方，會先被「可見角點」攔下——
         // 這是合理行為（連完整輪廓都看不到的影格不該當訓練樣本）。
         let absurd = Box3D::axis_aligned([0.0, 0.0, 1.0], [40.0, 40.0, 40.0]);
         let a = annotate_frame(&image, &camera(), &absurd, &AnnotateOptions::default(), 10);
-        assert!(!a.accepted && a.reason.as_deref().unwrap().contains("可見角點"), "{a:?}");
+        assert!(
+            !a.accepted && a.reason.as_deref().unwrap().contains("可見角點"),
+            "{a:?}"
+        );
     }
 
     /// 觀測點數太少（遮擋）應被拒絕。
@@ -791,7 +827,10 @@ mod tests {
         };
         let b = Box3D::axis_aligned([0.0, 0.0, 10.0], [2.0, 2.0, 2.0]);
         let a = annotate_frame(&image, &camera(), &b, &AnnotateOptions::default(), 0);
-        assert!(!a.accepted && a.reason.as_deref().unwrap().contains("遮擋"), "{a:?}");
+        assert!(
+            !a.accepted && a.reason.as_deref().unwrap().contains("遮擋"),
+            "{a:?}"
+        );
     }
 
     /// 上軸推定：相機繞同一水平圓環走一圈 → 上軸應接近世界 Y 軸且標記為「推定成功」。
@@ -907,8 +946,17 @@ mod tests {
         let s = summarize(&list);
         assert_eq!((s.frames_total, s.frames_accepted), (4, 1));
         assert!((s.acceptance_ratio - 0.25).abs() < 1e-9);
-        let corners = s.rejection_reasons.iter().find(|(k, _)| k.contains("可見角點")).map(|(_, v)| *v);
-        assert_eq!(corners, Some(2), "同類原因應聚合：{:?}", s.rejection_reasons);
+        let corners = s
+            .rejection_reasons
+            .iter()
+            .find(|(k, _)| k.contains("可見角點"))
+            .map(|(_, v)| *v);
+        assert_eq!(
+            corners,
+            Some(2),
+            "同類原因應聚合：{:?}",
+            s.rejection_reasons
+        );
     }
 
     /// 寫出 YOLO 標籤：只有被採用的影格會產生檔案。
@@ -926,11 +974,18 @@ mod tests {
             accepted: true,
             reason: None,
         };
-        let b = FrameAnnotation { frame: "frame_0002.jpg".into(), yolo: None, ..a.clone() };
+        let b = FrameAnnotation {
+            frame: "frame_0002.jpg".into(),
+            yolo: None,
+            ..a.clone()
+        };
         let n = write_yolo_labels(&dir, &[a, b], 5).expect("寫入應成功");
         assert_eq!(n, 1);
         let content = std::fs::read_to_string(dir.join("frame_0001.txt")).unwrap();
-        assert!(content.starts_with("5 0.500000 0.400000 0.300000 0.600000"), "內容錯誤：{content}");
+        assert!(
+            content.starts_with("5 0.500000 0.400000 0.300000 0.600000"),
+            "內容錯誤：{content}"
+        );
         assert!(!dir.join("frame_0002.txt").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1009,7 +1064,11 @@ mod tests {
                 track: (1..=8).map(|i| (i, 0)).collect(),
             })
             .collect();
-        let recon = SparseReconstruction { cameras, images, points };
+        let recon = SparseReconstruction {
+            cameras,
+            images,
+            points,
+        };
         let b = fit_box_from_points(&recon, &FitOptions::default()).expect("應可擬合");
         let ann = annotate_reconstruction(&recon, &b, &AnnotateOptions::default());
         let s = summarize(&ann);
