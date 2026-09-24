@@ -43,6 +43,7 @@ pub fn run_app() {
             commands::initialize_telemetry,
             commands::set_telemetry_consent,
             commands::list_project_snapshots,
+            commands::annotate_project,
             commands::get_snapshot_cloud,
         ])
         .run(tauri::generate_context!())

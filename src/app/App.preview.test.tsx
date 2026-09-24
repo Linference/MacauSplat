@@ -9,6 +9,7 @@ import { LanguageProvider } from "../i18n";
 import type { ProjectSummary } from "../types/pipeline";
 
 const mocks = vi.hoisted(() => ({
+  annotateProject: vi.fn(),
   cancelPipeline: vi.fn(),
   estimateProjectRuntime: vi.fn(),
   exportPly: vi.fn(),
@@ -31,6 +32,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../lib/backend", () => ({
+  annotateProject: mocks.annotateProject,
   cancelPipeline: mocks.cancelPipeline,
   checkEngines: vi.fn().mockResolvedValue([]),
   confirmAndDeleteProject: vi.fn().mockResolvedValue(false),
@@ -684,6 +686,56 @@ describe("App preview workspace", () => {
     await act(async () => pick("文件管理器").click());
     expect(mocks.exportPly).toHaveBeenCalledWith(result);
     expect(mocks.revealProject).toHaveBeenCalledWith(project);
+  });
+
+  it("runs auto-annotation from the completed result card and shows the summary", async () => {
+    mocks.annotateProject.mockResolvedValue({
+      outputDir: "C:/project/annotation",
+      qaHtml: "C:/project/annotation/qa.html",
+      framesTotal: 273,
+      framesAccepted: 49,
+      acceptanceRatio: 0.179,
+      boxSize: [12.7, 12.27, 3.54],
+      boxCenter: [0, 0, 0],
+      upAxisEstimated: false,
+      labelsWritten: 49,
+      rejectionReasons: [["insufficient corners", 215]],
+    });
+    // 這個測試需要自己的 result 夾具（其餘測試的 result 是區域變數）
+    const completed = {
+      projectId: project.id,
+      projectPath: project.projectPath,
+      finalPly: `${project.path}/final.ply`,
+      fileSize: 1024,
+      splatCount: 1000,
+      inputImages: 273,
+      registeredImages: 273,
+      registeredRatio: 1,
+      points3d: 44_011,
+      durationMs: 1000,
+      completedAt: new Date().toISOString(),
+    };
+    const projectPath = completed.projectPath;
+    await act(async () => {
+      useAppStore.setState({ phase: "completed", result: completed, projects: [project] });
+    });
+    await flush();
+
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".completion-result-actions button"),
+    );
+    const target = buttons.find((button) => (button.textContent ?? "").includes("產生標註"));
+    expect(target, `找不到「產生標註」按鈕；現有：${buttons.map((b) => b.textContent).join(" / ")}`).toBeTruthy();
+    await act(async () => (target as HTMLButtonElement).click());
+    await flush();
+
+    expect(mocks.annotateProject).toHaveBeenCalledWith(projectPath, 0);
+    const panel = container.querySelector(".annotation-result");
+    expect(panel).not.toBeNull();
+    // 摘要須包含採用的影格數、總影格數與包圍盒尺寸
+    expect(panel?.textContent).toContain("49");
+    expect(panel?.textContent).toContain("273");
+    expect(panel?.textContent).toContain("12.70");
   });
 
   it("restores the low-registration warning from historical project data", async () => {

@@ -377,6 +377,16 @@ const zhCN = {
     "pointcloud.snapshots": "快照份数",
     "pointcloud.distance": "视距",
     "pointcloud.open": "查看点云",
+
+    "annotation.run": "產生標註",
+    "annotation.running": "正在擬合包圍盒並投影…",
+    "annotation.title": "自動標註結果",
+    "annotation.summary": "採用 {accepted} / {total} 張（{ratio}）｜包圍盒 {size}",
+    "annotation.labels": "已寫出 {count} 個 YOLO 標籤",
+    "annotation.upEstimated": "上軸為推定值（相機軌跡退化，高度可能不準）",
+    "annotation.openFolder": "開啟標註資料夾",
+    "annotation.qaHint": "雙擊資料夾內的 qa.html 可人工複核框是否正確",
+    "annotation.failed": "自動標註失敗：{detail}",
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
@@ -443,6 +453,16 @@ const en: Record<TranslationKey, string> = {
     "pointcloud.snapshots": "Snapshots",
     "pointcloud.distance": "Distance",
     "pointcloud.open": "View point cloud",
+
+    "annotation.run": "Generate labels",
+    "annotation.running": "Fitting box and projecting…",
+    "annotation.title": "Auto-annotation result",
+    "annotation.summary": "{accepted} / {total} frames kept ({ratio}) | box {size}",
+    "annotation.labels": "{count} YOLO labels written",
+    "annotation.upEstimated": "Up axis was estimated (degenerate trajectory; height may be off)",
+    "annotation.openFolder": "Open annotation folder",
+    "annotation.qaHint": "Double-click qa.html inside the folder to review the boxes",
+    "annotation.failed": "Auto-annotation failed: {detail}",
 
 };
 

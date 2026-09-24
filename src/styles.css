@@ -607,3 +607,19 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
 .pointcloud-stats > div { display: flex; flex-direction: column; gap: 2px; }
 .pointcloud-stats dt { color: #7f93a8; }
 .pointcloud-stats dd { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; color: #c8a24a; }
+
+/* 自動標註結果（completion 卡片內） */
+.annotation-result {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(30, 92, 255, 0.06);
+  border: 1px solid rgba(30, 92, 255, 0.18);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.annotation-result strong { display: block; margin-bottom: 4px; }
+.annotation-result p { margin: 2px 0; }
+.annotation-error { color: #c0392b; }
+.annotation-warning { color: #b8860b; }
+.annotation-hint { color: #7f8c99; font-size: 12px; }

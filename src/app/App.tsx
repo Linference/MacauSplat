@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, Crosshair, FileBox, Images,
+  Blend, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Cpu, Crosshair, FileBox, Images, Tags,
   Download, Eye, FolderOpen, LoaderCircle, MapPin, Minus, Play, Plus, RotateCcw, Square, Trash2,
   Languages, Settings2, X, Zap,
 } from "lucide-react";
@@ -9,7 +9,7 @@ import packageMetadata from "../../package.json";
 import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
   cancelPipeline, checkEngines, confirmAndDeleteProject, confirmLargeImageSequence,
-  estimateProjectRuntime, exportPly, getAppRuntimeStatus, getProjectOverview, onPipelineEvent, probeAndPlan, revealProject, revealProjectLogs,
+  annotateProject, estimateProjectRuntime, exportPly, getAppRuntimeStatus, getProjectOverview, onPipelineEvent, probeAndPlan, revealFile, revealProject, revealProjectLogs,
   selectImageSequence, selectProjectsRoot, selectVideo,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
   initializeTelemetry, setTelemetryConsent, resumePipeline,
@@ -19,7 +19,7 @@ import { pipelineCommandError, pipelineErrorMessage, pipelineWasCancelled, type 
 import { localizePipelineMessage, useI18n, type TranslationKey } from "../i18n";
 import { useAppStore } from "../stores/appStore";
 import { useGaussianTransformStore } from "../stores/gaussianTransformStore";
-import type { EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
+import type { AnnotationOutcome, EngineStatus, InputType, ProjectStatus, ProjectSummary, Quality } from "../types/pipeline";
 import type { TelemetryPreferences as TelemetryPreferencesState } from "../types/telemetry";
 
 const GaussianViewer = lazy(() => import("../components/GaussianViewer").then((module) => ({ default: module.GaussianViewer })));
@@ -229,6 +229,10 @@ export function App() {
   const [viewMode, setViewMode] = useState<"tasks" | "preview">("tasks");
   /** 建圖點雲檢視：null 表示關閉；live 表示是否持續輪詢快照。 */
   const [cloudTarget, setCloudTarget] = useState<{ path: string; live: boolean } | null>(null);
+  /** 自動標註：結果摘要與進行中狀態。 */
+  const [annotation, setAnnotation] = useState<AnnotationOutcome | null>(null);
+  const [annotationError, setAnnotationError] = useState<string | null>(null);
+  const [annotating, setAnnotating] = useState(false);
   const [openingPreviewProjectId, setOpeningPreviewProjectId] = useState<string | null>(null);
   const [closingPreviewProjectId, setClosingPreviewProjectId] = useState<string | null>(null);
   const [previewSessionId, setPreviewSessionId] = useState(0);
@@ -727,6 +731,21 @@ export function App() {
     setCloudTarget({ path: projectPath, live });
   }, []);
 
+  /** 對已完成的專案執行自動標註（擬合包圍盒 → 投影 → 輸出 YOLO 標籤）。 */
+  const runAnnotation = useCallback(async () => {
+    const projectPath = store.result?.projectPath;
+    if (!projectPath || annotating) return;
+    setAnnotating(true);
+    setAnnotationError(null);
+    try {
+      setAnnotation(await annotateProject(projectPath, 0));
+    } catch (cause) {
+      setAnnotationError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAnnotating(false);
+    }
+  }, [annotating, store.result?.projectPath]);
+
   useEffect(() => () => {
     const active = activePreviewSession.current;
     if (active) {
@@ -870,9 +889,28 @@ export function App() {
           <div className="completion-result-actions">
             <button type="button" disabled={!store.projects.some((project) => project.id === store.result?.projectId && project.status === "completed")} onClick={previewCompletedResult}><Eye size={14} />{t("project.preview")}</button>
             <button type="button" onClick={() => { const path = store.result?.projectPath; if (path) openCloudViewer(path, false); }}><Crosshair size={14} />{t("pointcloud.open")}</button>
+            <button type="button" disabled={annotating} onClick={() => void runAnnotation()}>{annotating ? <LoaderCircle className="spin" size={14} /> : <Tags size={14} />}{annotating ? t("annotation.running") : t("annotation.run")}</button>
             <button type="button" onClick={() => void exportCompletedResult()}><Download size={14} />{t("result.export")}</button>
             <button type="button" onClick={() => void revealCompletedResult()}><FolderOpen size={14} />{t("result.reveal")}</button>
           </div>
+          {(annotation || annotationError) && <div className="annotation-result" role="status">
+            {annotationError && <p className="annotation-error">{t("annotation.failed", { detail: annotationError })}</p>}
+            {annotation && <>
+              <strong>{t("annotation.title")}</strong>
+              <p>{t("annotation.summary", {
+                accepted: formatNumber(annotation.framesAccepted),
+                total: formatNumber(annotation.framesTotal),
+                ratio: `${(annotation.acceptanceRatio * 100).toFixed(1)}%`,
+                size: annotation.boxSize.map((value) => value.toFixed(2)).join(" × ") + " m",
+              })}</p>
+              <p>{t("annotation.labels", { count: formatNumber(annotation.labelsWritten) })}</p>
+              {annotation.upAxisEstimated && <p className="annotation-warning">{t("annotation.upEstimated")}</p>}
+              <div className="completion-result-actions">
+                <button type="button" onClick={() => void revealFile(annotation.qaHtml)}><FolderOpen size={14} />{t("annotation.openFolder")}</button>
+              </div>
+              <p className="annotation-hint">{t("annotation.qaHint")}</p>
+            </>}
+          </div>}
         </section>}
 
         {store.error && <div className="inline-error"><CircleAlert size={16} /><span>{localizePipelineMessage(locale, store.error)}</span><button type="button" onClick={() => store.setError(null)}>{t("common.close")}</button></div>}

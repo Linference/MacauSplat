@@ -194,3 +194,17 @@ export interface SnapshotInfo {
   path: string;
   is_final: boolean;
 }
+
+/** 自動標註的結果摘要（由 Rust 端 commands::annotate_project 產生）。 */
+export interface AnnotationOutcome {
+  outputDir: string;
+  qaHtml: string;
+  framesTotal: number;
+  framesAccepted: number;
+  acceptanceRatio: number;
+  boxSize: [number, number, number];
+  boxCenter: [number, number, number];
+  upAxisEstimated: boolean;
+  labelsWritten: number;
+  rejectionReasons: [string, number][];
+}

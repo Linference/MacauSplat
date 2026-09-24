@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import type { SnapshotCloud, SnapshotInfo } from "../types/pipeline";
+import type { AnnotationOutcome, SnapshotCloud, SnapshotInfo } from "../types/pipeline";
 import type { AppRuntimeStatus, ColmapAccelerationStatus, EngineStatus, GaussianCrop, GaussianEditSaveSession, GaussianEditState, GaussianExportProgress, GaussianExportResult, GaussianPreviewDescriptor, GaussianTransform, GaussianVideoExportResult, GaussianVideoExportSession, PipelineEvent, PipelineResult, ProbeAndPlan, ProjectOverview, ProjectSummary, Quality, RuntimeEstimate } from "../types/pipeline";
 import type { TelemetryPreferences } from "../types/telemetry";
 import { getCurrentLocale, translate } from "../i18n";
@@ -152,4 +152,13 @@ export async function getSnapshotCloud(projectPath: string, maxPoints = 60_000):
 export async function listProjectSnapshots(projectPath: string): Promise<SnapshotInfo[]> {
   if (!inTauri()) return [];
   return invoke<SnapshotInfo[]>("list_project_snapshots", { projectPath });
+}
+
+/**
+ * 對已完成的專案執行自動標註：擬合三維包圍盒 → 投影到每張影格 → 輸出 YOLO 標籤。
+ * 輸出到 `<專案>/annotation/`，回傳摘要供介面顯示。
+ */
+export async function annotateProject(projectPath: string, classId = 0): Promise<AnnotationOutcome> {
+  if (!inTauri()) throw new Error("自動標註需要在桌面應用中執行");
+  return invoke<AnnotationOutcome>("annotate_project", { projectPath, classId });
 }

@@ -1420,3 +1420,89 @@ pub async fn list_project_snapshots(
     let path = PathBuf::from(project_path);
     Ok(crate::reconstruction::cloud::list_snapshots(&path))
 }
+
+/// 自動標註的結果摘要（回傳給介面顯示）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AnnotationOutcome {
+    /// 輸出目錄（標籤、明細、複核表都在這裡）。
+    pub output_dir: String,
+    /// 人工複核用的 HTML 路徑。
+    pub qa_html: String,
+    pub frames_total: usize,
+    pub frames_accepted: usize,
+    pub acceptance_ratio: f64,
+    /// 擬合出的包圍盒尺寸（公尺）。
+    pub box_size: [f64; 3],
+    pub box_center: [f64; 3],
+    /// 上軸是否為推定值（相機軌跡退化時為真）。
+    pub up_axis_estimated: bool,
+    pub labels_written: usize,
+    /// 未採用的原因分佈。
+    pub rejection_reasons: Vec<(String, usize)>,
+}
+
+/// 對已完成的專案執行自動標註：擬合三維包圍盒 → 投影到每張影格 → 輸出 YOLO 標籤。
+///
+/// 這是把命令列的 `fit-box` + `annotate` 兩步合成一個介面動作，
+/// 輸出到 `<專案>/annotation/`，並回傳摘要供介面顯示。
+#[tauri::command]
+pub async fn annotate_project(
+    project_path: String,
+    class_id: Option<usize>,
+) -> std::result::Result<AnnotationOutcome, SplatError> {
+    use crate::reconstruction::autolabel::{
+        annotate_reconstruction, fit_box_from_points, summarize, write_annotations_csv,
+        write_qa_html, write_yolo_labels, AnnotateOptions, FitOptions,
+    };
+    use crate::reconstruction::colmap::SparseReconstruction;
+
+    let project = PathBuf::from(project_path);
+    // 解析與投影是 CPU 密集的阻塞工作，放到阻塞執行緒避免卡住事件迴圈
+    let class_id = class_id.unwrap_or(0);
+    tokio::task::spawn_blocking(move || {
+        let reconstruction = SparseReconstruction::load(project.join("work/colmap"))
+            .or_else(|_| SparseReconstruction::load(&project))
+            .map_err(|e| SplatError::Process(format!("讀取稀疏重建失敗：{e}")))?;
+        let box3d = fit_box_from_points(&reconstruction, &FitOptions::default())
+            .ok_or_else(|| SplatError::Process("點雲不足，無法自動擬合包圍盒".into()))?;
+        let annotations =
+            annotate_reconstruction(&reconstruction, &box3d, &AnnotateOptions::default());
+        let summary = summarize(&annotations);
+
+        let output_dir = project.join("annotation");
+        std::fs::create_dir_all(&output_dir)?;
+        let labels_written = write_yolo_labels(output_dir.join("labels"), &annotations, class_id)?;
+        std::fs::write(
+            output_dir.join("annotations.json"),
+            serde_json::to_string_pretty(&annotations)?,
+        )?;
+        write_annotations_csv(output_dir.join("annotations.csv"), &annotations)?;
+        let box_path = output_dir.join("box.json");
+        std::fs::write(&box_path, serde_json::to_string_pretty(&box3d)?)?;
+        let qa_html = output_dir.join("qa.html");
+        // 複核表的影格路徑相對於輸出目錄
+        write_qa_html(
+            &qa_html,
+            "../work/frames",
+            &annotations,
+            &summary,
+            &box3d,
+            60,
+        )?;
+
+        Ok(AnnotationOutcome {
+            output_dir: output_dir.display().to_string(),
+            qa_html: qa_html.display().to_string(),
+            frames_total: summary.frames_total,
+            frames_accepted: summary.frames_accepted,
+            acceptance_ratio: summary.acceptance_ratio,
+            box_size: box3d.size,
+            box_center: box3d.center,
+            up_axis_estimated: box3d.up_axis_estimated,
+            labels_written,
+            rejection_reasons: summary.rejection_reasons,
+        })
+    })
+    .await
+    .map_err(|e| SplatError::Process(format!("標註工作失敗：{e}")))?
+}
