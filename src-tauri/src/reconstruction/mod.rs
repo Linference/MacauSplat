@@ -1,4 +1,4 @@
-﻿pub mod autolabel;
+pub mod autolabel;
 pub mod colmap;
 pub mod inspect;
 pub mod edit_mask;

@@ -1,4 +1,4 @@
-﻿pub mod commands;
+pub mod commands;
 pub mod engines;
 pub mod error;
 pub mod pipeline;
