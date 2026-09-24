@@ -104,6 +104,25 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         qa_limit: usize,
     },
+    /// Live progress dashboard for a project (FFmpeg extraction / COLMAP / Brush).
+    ///
+    /// Writes a self-refreshing HTML page (no web server required) and prints a
+    /// text summary. Use `--watch` to keep regenerating it while the pipeline runs.
+    Monitor {
+        project: PathBuf,
+        /// Where to write the dashboard (default: `<project>/monitor.html`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Keep regenerating the page (pair with the page's meta refresh).
+        #[arg(long)]
+        watch: bool,
+        /// Refresh interval in seconds.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+        /// Frames directory as seen from the HTML file.
+        #[arg(long, default_value = "work/frames")]
+        frames_href: String,
+    },
 }
 
 #[tokio::main]
@@ -327,6 +346,48 @@ async fn execute(cli: Cli) -> Result<()> {
                 }
             }
             println!("輸出：{}（labels/、annotations.json、annotations.csv、qa.html）", out.display());
+        }
+        Commands::Monitor {
+            project,
+            out,
+            watch,
+            interval,
+            frames_href,
+        } => {
+            use ooo_splat::pipeline::monitor::{default_output, read_snapshot, render_html};
+
+            let out_path = out.unwrap_or_else(|| default_output(&project));
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let title = format!("{} · 即時監視", project.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+            loop {
+                let snap = read_snapshot(&project);
+                std::fs::write(&out_path, render_html(&snap, &frames_href, interval, &title))?;
+                // 每次迭代都印出文字摘要，方便在終端機直接看（不必開瀏覽器）
+                println!(
+                    "[{}] 階段：{}\n    抽幀 {} 張（速度 {}）｜特徵 {} 張｜匹配 {}/{}｜已註冊 {}（{}）｜三維點 {}｜快照 {}",
+                    chrono::Local::now().format("%H:%M:%S"),
+                    snap.stage,
+                    snap.frames_on_disk,
+                    snap.ffmpeg.speed.map(|s| format!("{s:.1}x")).unwrap_or_else(|| "—".into()),
+                    snap.colmap.feature_images,
+                    snap.colmap.matching_done,
+                    snap.colmap.matching_total,
+                    snap.colmap.registered_images,
+                    if snap.colmap.registered_source == "model" { "讀自模型" } else { "日誌估算" },
+                    snap.colmap.points,
+                    snap.colmap.snapshots,
+                );
+                if !watch {
+                    println!("已寫入 {}", out_path.display());
+                    println!("用瀏覽器開啟即可（頁面每 {interval} 秒自動重整）；要持續更新請加 --watch");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+            }
         }
     }
     Ok(())

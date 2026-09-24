@@ -38,6 +38,19 @@ pub fn detect_cli_family(feature_help: &str, matching_help: &str) -> Option<Colm
     }
 }
 
+/// 查詢某個 COLMAP 子命令是否支援特定選項（用 `-h` 的輸出判斷）。
+///
+/// 用途：`--Mapper.snapshot_*` 這類選項在舊版 COLMAP 不存在，直接加會讓 mapper 失敗；
+/// 因此先問 help，只有確定支援才附加。任何查詢失敗都回傳 `false`（保守：不改變既有行為）。
+async fn colmap_supports_option(
+    executable: &Path,
+    command_name: &str,
+    option: &str,
+) -> Result<bool> {
+    let help = command_help(executable, command_name, &ProcessManager::new()).await?;
+    Ok(help.contains(option))
+}
+
 async fn command_help(
     executable: &Path,
     command_name: &str,
@@ -299,23 +312,41 @@ pub async fn map(
     observer: Option<ProcessObserver>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(output).await?;
+    let mut args: Vec<OsString> = vec![
+        "mapper".into(),
+        "--database_path".into(),
+        database.into(),
+        "--image_path".into(),
+        images.into(),
+        "--output_path".into(),
+        output.into(),
+    ];
+    // 中間快照：讓外部監視工具能在建圖過程中看到「點雲正在長大」，而不必等整個重建結束。
+    // 這是 COLMAP 內建選項（--Mapper.snapshot_path / snapshot_images_freq）；
+    // 舊版可能沒有，因此先問 help，不支援就靜默略過，不影響重建本身。
+    if let Some(snapshot_dir) = snapshot_directory(output) {
+        if let Ok(true) = colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path").await {
+            let _ = tokio::fs::create_dir_all(&snapshot_dir).await;
+            args.push("--Mapper.snapshot_path".into());
+            args.push(snapshot_dir.clone().into());
+            args.push("--Mapper.snapshot_images_freq".into());
+            args.push(OsString::from("10"));
+        }
+    }
     run_colmap(
         executable,
-        vec![
-            "mapper".into(),
-            "--database_path".into(),
-            database.into(),
-            "--image_path".into(),
-            images.into(),
-            "--output_path".into(),
-            output.into(),
-        ],
+        args,
         database.parent().unwrap_or(output),
         log,
         manager,
         observer,
     )
     .await
+}
+
+/// 中間快照的輸出目錄（與最終稀疏模型分開，避免污染 `sparse/0`）。
+pub fn snapshot_directory(output: &Path) -> Option<PathBuf> {
+    Some(output.join("snapshots"))
 }
 
 #[cfg(test)]
