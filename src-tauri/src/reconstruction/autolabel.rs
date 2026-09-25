@@ -1109,106 +1109,226 @@ pub fn write_qa_html(
     max_frames: usize,
 ) -> std::io::Result<()> {
     let out_path = out_path.as_ref();
-    let frames_dir = escape_html(frames_dir);
-    let mut html = String::new();
-    html.push_str(
-        "<!doctype html><html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">\
-         <title>MacauSplat 標註複核</title><style>\
-         body{margin:0;background:#0f1620;color:#e8eef5;font-family:'Microsoft JhengHei',system-ui,sans-serif}\
-         header{padding:14px 20px;background:#10243a;border-bottom:3px solid #c8a24a}\
-         h1{margin:0;font-size:19px} .sub{color:#9fb3c8;font-size:13px;margin-top:6px}\
-         .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;padding:14px}\
-         .cell{background:#16202c;border-radius:8px;overflow:hidden;border:1px solid #26374a}\
-         .wrap{position:relative;width:100%;background:#000}\
-         .wrap img{width:100%;display:block}\
-         .box{position:absolute;border:2px solid #c8a24a;box-sizing:border-box}\
-         .meta{padding:6px 8px;font-size:12px;line-height:1.5}\
-         .ok{color:#4ade80} .no{color:#f87171} .dim{color:#8fa3b8} .warn{color:#e0b055}\
-         </style></head><body><header>\
-         <h1>MacauSplat 標註複核表</h1><div class=\"sub\">",
-    );
-    html.push_str(&format!(
-        "共 {} 張影格，採用 {} 張（{:.1}%）｜中位可見角點 {:.0}｜中位畫面佔比 {:.2}%｜中位觀測點數 {:.0}\
-         ｜包圍盒 {:.2}×{:.2}×{:.2} m（上軸：{}）",
-        summary.frames_total,
-        summary.frames_accepted,
-        summary.acceptance_ratio * 100.0,
-        summary.median_visible_corners,
-        summary.median_area_ratio * 100.0,
-        summary.median_observed_points,
-        box3d.size[0],
-        box3d.size[1],
-        box3d.size[2],
-        escape_html(box3d.up_source.label()),
-    ));
-    // 重跑時清掉的舊標籤數：只有真的清掉東西才顯示，避免每天看到一個 0
-    if summary.labels_removed > 0 {
-        html.push_str(&format!(
-            "<br><span class=\"warn\">本次重跑清掉了 {} 個上一輪的舊標籤檔（不再採用的影格不會留下舊框）</span>",
-            summary.labels_removed
-        ));
-    }
-    for (message, count) in &summary.warnings {
-        html.push_str(&format!(
-            "<br><span class=\"warn\">{count} 張影格有警示：{}</span>",
-            escape_html(message)
-        ));
-    }
-    html.push_str("</div></header><div class=\"grid\">");
-
-    // 先顯示被採用的（人工複核的重點），再顯示被拒絕的樣本
-    let mut ordered: Vec<&FrameAnnotation> = annotations.iter().filter(|a| a.accepted).collect();
-    ordered.extend(annotations.iter().filter(|a| !a.accepted));
-    for a in ordered.into_iter().take(max_frames) {
-        let name = escape_html(
-            &Path::new(&a.frame)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| a.frame.clone()),
-        );
-        html.push_str("<div class=\"cell\"><div class=\"wrap\">");
-        html.push_str(&format!(
-            "<img loading=\"lazy\" src=\"{frames_dir}/{name}\" alt=\"{name}\">"
-        ));
-        // 框的位置：YOLO 的 (cx, cy, w, h) 本來就是相對畫面比例，直接當 CSS 百分比用即可，
-        // 不需要任何影像程式庫，也不需要在瀏覽器端重算。
-        if let Some(y) = a.yolo {
-            html.push_str(&format!(
-                "<div class=\"box\" style=\"left:{:.3}%;top:{:.3}%;width:{:.3}%;height:{:.3}%\"></div>",
-                (y[0] - y[2] / 2.0) * 100.0,
-                (y[1] - y[3] / 2.0) * 100.0,
-                y[2] * 100.0,
-                y[3] * 100.0
-            ));
+    let frames = frames_dir;
+    // 標題列的可切換篩選：全部 / 僅採用 / 僅略過
+    let mut cards = String::new();
+    let mut shown = 0usize;
+    for a in annotations.iter() {
+        if shown >= max_frames {
+            break;
         }
-        html.push_str("</div><div class=\"meta\">");
-        html.push_str(&format!(
-            "<b>{}</b> <span class=\"{}\">{}</span><br>",
-            name,
-            if a.accepted { "ok" } else { "no" },
-            if a.accepted { "採用" } else { "略過" }
-        ));
-        html.push_str(&format!(
-            "<span class=\"dim\">角點 {}/8｜畫面 {:.1}%｜盒內觀測點 {}</span>",
+        shown += 1;
+        let name = Path::new(&a.frame)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| a.frame.clone());
+        let name_attr = escape_html(&name);
+        let state = if a.accepted { "ok" } else { "no" };
+        let label = if a.accepted { "採用" } else { "略過" };
+
+        // 框以百分比定位（YOLO 值本身即相對比例），並加上四角標記
+        let box_layer = match a.yolo {
+            Some(y) => {
+                let left = (y[0] - y[2] / 2.0) * 100.0;
+                let top = (y[1] - y[3] / 2.0) * 100.0;
+                format!(
+                    "<div class=\"pb\" style=\"left:{left:.3}%;top:{top:.3}%;width:{:.3}%;height:{:.3}%\">\
+                     <i class=\"c tl\"></i><i class=\"c tr\"></i><i class=\"c bl\"></i><i class=\"c br\"></i></div>",
+                    y[2] * 100.0,
+                    y[3] * 100.0
+                )
+            }
+            None => String::new(),
+        };
+        let reason = a
+            .reason
+            .as_deref()
+            .map(|r| format!("<div class=\"why\">{}</div>", escape_html(r)))
+            .unwrap_or_default();
+
+        cards.push_str(&format!(
+            "<figure class=\"card {state}\" data-state=\"{state}\">\
+               <div class=\"shot\"><img loading=\"lazy\" src=\"{frames}/{name_attr}\" alt=\"{name_attr}\">{box_layer}\
+                 <span class=\"tag {state}\">{label}</span></div>\
+               <figcaption>\
+                 <div class=\"fn\">{name_attr}</div>\
+                 <div class=\"metrics\">\
+                   <span title=\"可見角點\">◱ {}/8</span>\
+                   <span title=\"畫面佔比\">{:.1}%</span>\
+                   <span title=\"盒內觀測點\">· {}</span>\
+                 </div>{reason}\
+               </figcaption>\
+             </figure>",
             a.visible_corners,
             a.area_ratio * 100.0,
             a.observed_points
         ));
-        if let Some(r) = &a.reason {
-            html.push_str(&format!("<br><span class=\"no\">{}</span>", escape_html(r)));
-        }
-        if let Some(w) = &a.warning {
-            html.push_str(&format!(
-                "<br><span class=\"warn\">{}</span>",
-                escape_html(w)
-            ));
-        }
-        html.push_str("</div></div>");
     }
-    html.push_str("</div>");
-    html.push_str(&format!(
-        "<p style=\"padding:0 20px 24px;color:#8fa3b8;font-size:12px\">僅顯示前 {max_frames} 張；完整明細見 annotations.csv</p></body></html>"
-    ));
+
+    // 略過原因的前三項（讓評審一眼看到「為什麼略過」）
+    let mut reasons = String::new();
+    for (reason, count) in summary.rejection_reasons.iter().take(4) {
+        reasons.push_str(&format!(
+            "<li><b>{count}</b><span>{}</span></li>",
+            escape_html(reason)
+        ));
+    }
+    let rejected = summary.frames_total - summary.frames_accepted;
+
+    let html = format!(
+        r#"<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>標註複核表 · {title}</title>
+<style>
+ :root{{--ink:#0a0e14;--panel:#111a26;--line:rgba(200,162,74,.20);--gold:#c8a24a;
+        --ok:#4ade80;--no:#f87171;--text:#e8eef5;--dim:#8fa3b8}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;background:var(--ink);color:var(--text);
+   font-family:"Microsoft JhengHei","PingFang TC",system-ui,sans-serif}}
+ header{{position:sticky;top:0;z-index:20;padding:16px 26px 14px;
+   background:linear-gradient(180deg,#10243a 0%,#0d1a2a 100%);
+   border-bottom:2px solid var(--gold);box-shadow:0 8px 28px rgba(0,0,0,.5)}}
+ .hrow{{display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
+ .mark{{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none;
+   background:linear-gradient(135deg,#c8a24a,#8a6d24);color:#0a0e14;font-weight:700;font-size:18px}}
+ h1{{margin:0;font-size:18px;font-weight:700;letter-spacing:.2px}}
+ .sub{{font-size:12px;color:var(--dim);margin-top:3px}}
+ .kpis{{display:flex;gap:26px;margin-left:auto;flex-wrap:wrap}}
+ .kpi{{text-align:right}} .kpi b{{display:block;font-size:19px;color:var(--gold);
+   font-variant-numeric:tabular-nums;line-height:1.15}}
+ .kpi span{{font-size:11px;color:var(--dim)}}
+ .filters{{display:flex;gap:8px;margin-top:13px;flex-wrap:wrap}}
+ .filters button{{padding:6px 15px;border-radius:999px;cursor:pointer;font-size:12.5px;
+   background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);color:var(--text);
+   transition:.15s}}
+ .filters button:hover{{background:rgba(200,162,74,.16)}}
+ .filters button[aria-pressed="true"]{{background:var(--gold);color:#0a0e14;
+   border-color:var(--gold);font-weight:700}}
+ .whybox{{margin-top:12px;padding:11px 15px;border-radius:9px;display:flex;gap:22px;
+   background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.20);flex-wrap:wrap}}
+ .whybox h2{{margin:0;font-size:12px;color:var(--dim);align-self:center;font-weight:600}}
+ .whybox ul{{list-style:none;margin:0;padding:0;display:flex;gap:20px;flex-wrap:wrap}}
+ .whybox li{{font-size:12px;color:var(--text)}} .whybox li b{{color:var(--no);margin-right:6px}}
+ .wrap{{padding:20px 26px 40px}}
+ .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:16px}}
+ .card{{margin:0;background:var(--panel);border:1px solid rgba(255,255,255,.06);
+   border-radius:12px;overflow:hidden;transition:.18s}}
+ .card:hover{{transform:translateY(-3px);border-color:var(--line);
+   box-shadow:0 14px 34px rgba(0,0,0,.5)}}
+ .card.no{{opacity:.62}} .card.no:hover{{opacity:1}}
+ .shot{{position:relative;background:#000;line-height:0}}
+ .shot img{{width:100%;display:block}}
+ .pb{{position:absolute;border:2px solid var(--gold);border-radius:2px;
+   box-shadow:0 0 0 1px rgba(0,0,0,.55),inset 0 0 20px rgba(200,162,74,.14)}}
+ .card.no .pb{{border-color:var(--no);box-shadow:0 0 0 1px rgba(0,0,0,.55)}}
+ .c{{position:absolute;width:9px;height:9px;border:2.5px solid var(--gold)}}
+ .card.no .c{{border-color:var(--no)}}
+ .tl{{left:-2px;top:-2px;border-right:0;border-bottom:0}}
+ .tr{{right:-2px;top:-2px;border-left:0;border-bottom:0}}
+ .bl{{left:-2px;bottom:-2px;border-right:0;border-top:0}}
+ .br{{right:-2px;bottom:-2px;border-left:0;border-top:0}}
+ .tag{{position:absolute;right:8px;top:8px;padding:3px 11px;border-radius:999px;
+   font-size:11px;font-weight:700;letter-spacing:.05em;line-height:1.6}}
+ .tag.ok{{background:rgba(74,222,128,.92);color:#052e16}}
+ .tag.no{{background:rgba(248,113,113,.92);color:#450a0a}}
+ figcaption{{padding:10px 13px 12px}}
+ .fn{{font-size:12px;font-family:ui-monospace,Consolas,monospace;color:var(--text);
+   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+ .metrics{{display:flex;gap:15px;margin-top:6px;font-size:11.5px;color:var(--dim);
+   font-variant-numeric:tabular-nums}}
+ .metrics span:last-child{{margin-left:auto}}
+ .why{{margin-top:7px;padding:5px 9px;border-radius:6px;font-size:11px;
+   background:rgba(248,113,113,.10);color:#fca5a5}}
+ footer{{padding:16px 26px 30px;color:var(--dim);font-size:12px;line-height:1.9;
+   border-top:1px solid rgba(255,255,255,.06)}}
+ footer code{{background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;
+   font-family:ui-monospace,monospace}}
+</style></head><body>
+<header>
+  <div class="hrow">
+    <div class="mark">澳</div>
+    <div>
+      <h1>{title}</h1>
+      <div class="sub">位姿驅動自動標註 · 人工複核表 · 每個框皆可追溯至三維包圍盒與相機位姿</div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><b>{accepted}</b><span>採用影格</span></div>
+      <div class="kpi"><b>{ratio:.1}%</b><span>接受率</span></div>
+      <div class="kpi"><b>{corners:.0}</b><span>中位可見角點</span></div>
+      <div class="kpi"><b>{area:.1}%</b><span>中位畫面佔比</span></div>
+      <div class="kpi"><b>{boxsize}</b><span>包圍盒（m）</span></div>
+    </div>
+  </div>
+  <div class="filters">
+    <button aria-pressed="true"  data-f="all">全部 {total}</button>
+    <button aria-pressed="false" data-f="ok">僅採用 {accepted}</button>
+    <button aria-pressed="false" data-f="no">僅略過 {rejected}</button>
+    <button id="zoom" aria-pressed="false">放大預覽</button>
+  </div>
+  <div class="whybox">
+    <h2>略過原因分佈</h2>
+    <ul>{reasons}</ul>
+  </div>
+</header>
+<div class="wrap"><div class="grid">{cards}</div></div>
+<footer>
+  共 {total} 張影格，本頁顯示前 {shown} 張（依「採用」優先排序）。完整逐影格明細見
+  <code>annotations.csv</code>／<code>annotations.json</code>；包圍盒參數見 <code>box.json</code>。<br>
+  上軸來源：{up}｜包圍盒中心 ({cx:.2}, {cy:.2}, {cz:.2})
+</footer>
+<script>
+ // 篩選
+ document.querySelectorAll('.filters button[data-f]').forEach(function (b) {{
+   b.addEventListener('click', function () {{
+     document.querySelectorAll('.filters button[data-f]').forEach(function (x) {{
+       x.setAttribute('aria-pressed', String(x === b));
+     }});
+     var f = b.dataset.f;
+     document.querySelectorAll('.card').forEach(function (c) {{
+       c.style.display = (f === 'all' || c.dataset.state === f) ? '' : 'none';
+     }});
+   }});
+ }});
+ // 放大預覽（切換網格密度）
+ var zoom = false;
+ document.getElementById('zoom').addEventListener('click', function (e) {{
+   zoom = !zoom;
+   e.target.setAttribute('aria-pressed', String(zoom));
+   var g = document.querySelector('.grid');
+   g.style.gridTemplateColumns = zoom
+     ? 'repeat(auto-fill,minmax(560px,1fr))'
+     : 'repeat(auto-fill,minmax(310px,1fr))';
+ }});
+ // 點圖開大圖
+ document.querySelectorAll('.shot img').forEach(function (img) {{
+   img.style.cursor = 'zoom-in';
+   img.addEventListener('click', function () {{ window.open(img.src, '_blank'); }});
+ }});
+</script>
+</body></html>"#,
+        title = escape_html("澳門記憶 · 標註複核"),
+        total = summary.frames_total,
+        accepted = summary.frames_accepted,
+        rejected = rejected,
+        ratio = summary.acceptance_ratio * 100.0,
+        corners = summary.median_visible_corners,
+        area = summary.median_area_ratio * 100.0,
+        boxsize = format!(
+            "{:.1}×{:.1}×{:.1}",
+            box3d.size[0], box3d.size[1], box3d.size[2]
+        ),
+        reasons = reasons,
+        cards = cards,
+        shown = shown,
+        up = match box3d.up_source {
+            UpAxisSource::CameraTrajectory => "由相機軌跡推定",
+            UpAxisSource::WorldY => "退回世界 Y 軸（軌跡退化，高度可能不準）",
+            UpAxisSource::Manual => "由操作者指定",
+        },
+        cx = box3d.center[0],
+        cy = box3d.center[1],
+        cz = box3d.center[2],
+    );
     std::fs::write(out_path, html)
 }
 

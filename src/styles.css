@@ -4,13 +4,13 @@
   background: #eef1f5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --ink: #172033;
-  --muted: #667084;
-  --faint: #8a94a5;
-  --paper: #f8f9fb;
-  --surface: #eef1f5;
-  --line: #d4dae3;
-  --line-dark: #bdc5d1;
+  --ink: #1b2230;
+  --muted: #6a7385;
+  --faint: #98a1b0;
+  --paper: #fbfaf8;
+  --surface: #f2f0ec;
+  --line: #e2ded6;
+  --line-dark: #c8c3b8;
   --blue: #1e5cff;
   --blue-dark: #1748ca;
   --green: #2d9965;
@@ -18,10 +18,10 @@
   --red: #b04a40;
   /* 深色面板語彙（建圖點雲檢視等深色區塊專用）：
      --line 是淺色分隔線，在 #0b0f14 上會出現突兀亮灰線，深色面板改用下面這組。 */
-  --panel: #10161d;
-  --panel-ink: #e8eef5;
-  --panel-line: #22303f;
-  --panel-accent: #38e8ff;
+  --panel: #12161c;
+  --panel-ink: #eef1f5;
+  --panel-line: #262d38;
+  --panel-accent: #d4af37;
   --font-sans: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
 }
 
@@ -53,7 +53,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .brand-mark { width: 31px; height: 31px; display: grid; place-items: center; overflow: hidden; }
 .brand-mark img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brand-name { font: 650 20px/1 "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif; letter-spacing: -.025em; }
-.brand-name span { color: var(--blue); }
+.brand-name span { color: var(--gold); }   /* 與蓮花標誌的金一致 */
 .version-tag { margin-left: 10px; padding-left: 18px; color: #7b8596; border-left: 1px solid var(--line); font: 600 11px/1 "Cascadia Mono", monospace; letter-spacing: .1em; }
 .engine-summary { gap: 9px; color: var(--muted); font-size: 13px; }
 .topbar-actions { gap: 17px; }
@@ -558,7 +558,7 @@ h1, h2 { margin: 0; font: 650 29px/1 "Bahnschrift", "Microsoft YaHei UI", sans-s
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: #0b0f14;
+  background: var(--panel);
   color: var(--panel-ink);
 }
 .pointcloud-topbar {
