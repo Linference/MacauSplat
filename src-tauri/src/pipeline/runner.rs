@@ -1936,8 +1936,9 @@ mod tests {
         sink.terminal(&SplatError::Process("boom".into()));
 
         let events = events.lock().unwrap();
-        assert_eq!(events[0].progress, 79.0);
-        assert_eq!(events[1].progress, 79.0);
+        // 訓練區間加入標註階段後由 60~98 順延為 62~98，0.5 的位置因此是 80.0
+        assert_eq!(events[0].progress, 80.0);
+        assert_eq!(events[1].progress, 80.0);
         assert_eq!(events[1].stage_progress, None);
         assert_eq!(events[1].stage, PipelineStage::Failed);
         assert_eq!(

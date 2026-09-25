@@ -180,9 +180,15 @@ fn safe_error_code(error: &SplatError, stage: Option<TelemetryStage>) -> Telemet
                     TelemetryErrorCode::ColmapMapperFailed
                 }
                 Some(TelemetryStage::TrainingSplats) => TelemetryErrorCode::BrushFailed,
-                Some(TelemetryStage::Exporting | TelemetryStage::Unknown) | None => {
-                    TelemetryErrorCode::Unknown
-                }
+                // 自動標註是本專案新增的階段；它的失敗（點雲不足、寫檔失敗）沒有對應的
+                // 引擎錯誤碼，因此與匯出階段一樣歸為 Unknown——刻意不借用 COLMAP/Brush 的碼，
+                // 以免遙測資料誤導（看起來像引擎問題，其實是標註流程）。
+                Some(
+                    TelemetryStage::Annotating
+                    | TelemetryStage::Exporting
+                    | TelemetryStage::Unknown,
+                )
+                | None => TelemetryErrorCode::Unknown,
             }
         }
     }
