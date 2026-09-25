@@ -209,7 +209,8 @@ describe("App live log", () => {
 
     expect(container.querySelector(".live-heading .mono")?.textContent).toBe("50.0%");
     const timeline = container.querySelectorAll(".stage-timeline li");
-    expect(timeline[5].classList.contains("failed")).toBe(true);
-    expect(timeline[6].className).toBe("");
+    expect(timeline[6].classList.contains("failed")).toBe(true);
+      // 自動標註階段插在訓練之前，索引因此順移一位
+    expect(timeline[7].className).toBe("");
   });
 });

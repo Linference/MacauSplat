@@ -156,7 +156,8 @@ const qualities: Array<{ value: Quality; label: TranslationKey; description: Tra
 const stages = [
   ["probingVideo", "stage.material"], ["extractingFrames", "stage.frames"],
   ["extractingFeatures", "stage.features"], ["matching", "stage.matching"],
-  ["reconstructing", "stage.reconstruction"], ["trainingSplats", "stage.training"],
+  ["reconstructing", "stage.reconstruction"], ["annotating", "stage.annotation"],
+  ["trainingSplats", "stage.training"],
   ["exporting", "stage.export"],
 ] as const;
 

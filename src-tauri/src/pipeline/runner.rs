@@ -839,6 +839,40 @@ impl PipelineRunner {
             ),
         );
 
+        // ── 自動標註階段 ───────────────────────────────────────────────
+        // 只依賴重建結果（位姿＋稀疏點雲），因此放在訓練之前：使用者若中途取消
+        // 訓練，資料集已經產出——對「以資料集為主要產物」的建築辨識用途尤其重要。
+        //
+        // 標註失敗**不讓整個重建失敗**：三維模型本身仍有價值，因此只發出警告
+        // 事件後繼續訓練，而不是回傳 Err。這裡是本專案唯一「非致命」的階段。
+        self.events
+            .stage(PipelineStage::Annotating, 0.0, "正在由相机位姿投影自动标注");
+        state.stage = PipelineStage::Annotating;
+        project_manager.write_state(&paths.state, &state).await?;
+        match annotate_project_outputs(paths).await {
+            Ok(summary) => {
+                state.annotation_complete = true;
+                project_manager.write_state(&paths.state, &state).await?;
+                self.events.stage(PipelineStage::Annotating, 1.0, summary);
+            }
+            Err(reason) => {
+                self.events.send(
+                    PipelineStage::Annotating,
+                    Some(PipelineEngine::System),
+                    EventKind::Log,
+                    EventLevel::Warning,
+                    None,
+                    false,
+                    format!("自動標註略過（不影響三維重建）：{reason}"),
+                    None,
+                    None,
+                    None,
+                );
+                self.events
+                    .stage(PipelineStage::Annotating, 1.0, "自動標註略過");
+            }
+        }
+
         let preset = quality.preset();
         let candidate = if state.brush_complete {
             self.events.stage(
@@ -1450,6 +1484,76 @@ pub fn default_engine_paths(engine_root: Option<PathBuf>) -> EnginePaths {
         .unwrap_or_else(|| EnginePaths::discover(None))
 }
 
+/// 由重建結果產生逐影格標註，輸出到 `<專案>/annotation/`。
+///
+/// 抽成獨立函式有兩個理由：讓階段邏輯保持簡短可讀，以及讓它能被單獨測試。
+/// 回傳人類可讀的完成訊息；失敗時回傳原因字串（呼叫端決定是否致命）。
+async fn annotate_project_outputs(
+    paths: &crate::project::ProjectPaths,
+) -> std::result::Result<String, String> {
+    use crate::reconstruction::autolabel::{
+        annotate_reconstruction, fit_box_from_points, summarize, write_annotations_csv,
+        write_qa_html, write_yolo_labels, AnnotateOptions, FitOptions,
+    };
+    use crate::reconstruction::colmap::SparseReconstruction;
+
+    let colmap = paths.colmap.clone();
+    let project = paths.project.clone();
+
+    // 解析與投影是 CPU 密集的阻塞工作，移到阻塞執行緒避免卡住事件迴圈
+    tokio::task::spawn_blocking(move || {
+        let reconstruction =
+            SparseReconstruction::load(&colmap).map_err(|e| format!("讀取稀疏重建失敗：{e}"))?;
+        let box3d = fit_box_from_points(&reconstruction, &FitOptions::default())
+            .map_err(|e| format!("無法擬合包圍盒：{e}"))?;
+        let annotations =
+            annotate_reconstruction(&reconstruction, &box3d, &AnnotateOptions::default());
+        let summary = summarize(&annotations);
+
+        let output = project.join("annotation");
+        std::fs::create_dir_all(&output).map_err(|e| format!("建立輸出目錄失敗：{e}"))?;
+        let label_report = write_yolo_labels(output.join("labels"), &annotations, 0)
+            .map_err(|e| format!("寫出標籤失敗：{e}"))?;
+        std::fs::write(
+            output.join("annotations.json"),
+            serde_json::to_string_pretty(&annotations).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("寫出明細失敗：{e}"))?;
+        write_annotations_csv(output.join("annotations.csv"), &annotations)
+            .map_err(|e| format!("寫出 CSV 失敗：{e}"))?;
+        std::fs::write(
+            output.join("box.json"),
+            serde_json::to_string_pretty(&box3d).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("寫出包圍盒失敗：{e}"))?;
+
+        // 輸出在 <專案>/annotation/、影格在 <專案>/work/frames/，
+        // 因此相對路徑恆為 ../work/frames——不需要動態計算。
+        write_qa_html(
+            output.join("qa.html"),
+            "../work/frames",
+            &annotations,
+            &summary,
+            &box3d,
+            60,
+        )
+        .map_err(|e| format!("寫出複核表失敗：{e}"))?;
+
+        let cleared = if label_report.removed > 0 {
+            format!("，清除舊標籤 {} 個", label_report.removed)
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "已產生 {} 個標註（採用 {} / {} 張影格）{cleared}",
+            label_report.written, summary.frames_accepted, summary.frames_total
+        ))
+    })
+    .await
+    .map_err(|e| format!("標註工作失敗：{e}"))?
+}
+
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;

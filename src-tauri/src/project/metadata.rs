@@ -252,6 +252,12 @@ pub struct PipelineStateFile {
     pub features_complete: bool,
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
+    /// 自動標註是否完成。
+    ///
+    /// 加 `serde(default)` 是必要的：已存在的專案其 state.json 沒有這個欄位，
+    /// 沒有 default 會讓舊專案無法載入（直接反序列化失敗）。
+    #[serde(default)]
+    pub annotation_complete: bool,
     pub brush_complete: bool,
 }
 
@@ -271,6 +277,7 @@ impl PipelineStateFile {
             features_complete: false,
             matching_complete: false,
             reconstruction_complete: false,
+            annotation_complete: false,
             brush_complete: false,
         }
     }
