@@ -1113,6 +1113,19 @@ pub fn write_qa_html(
     // 標題列的可切換篩選：全部 / 僅採用 / 僅略過
     let mut cards = String::new();
     let mut shown = 0usize;
+    // 有警示的影格（例如魚眼相機的投影僅為近似）：必須讓使用者看到，
+    // 否則他會以為每一張標註都同樣可信。
+    let warned = annotations.iter().filter(|a| a.warning.is_some()).count();
+    let mut warn_items = String::new();
+    for a in annotations.iter().filter(|a| a.warning.is_some()).take(3) {
+        if let Some(w) = &a.warning {
+            warn_items.push_str(&format!(
+                "<li><b>{}</b><span>{}</span></li>",
+                escape_html(&a.frame),
+                escape_html(w)
+            ));
+        }
+    }
     for a in annotations.iter() {
         if shown >= max_frames {
             break;
@@ -1175,6 +1188,24 @@ pub fn write_qa_html(
     }
     let rejected = summary.frames_total - summary.frames_accepted;
 
+    let warnbox = if warned > 0 {
+        format!("<div class=whyboxwarn><h2>{warned} 張影格有警示</h2><ul>{warn_items}</ul></div>")
+    } else {
+        String::new()
+    };
+    let removed_note = if summary.labels_removed > 0 {
+        format!(
+            "本次重跑清掉了 {} 個上一輪的舊標籤檔。<br>",
+            summary.labels_removed
+        )
+    } else {
+        String::new()
+    };
+    // 先算好再傳入：clippy 不允許在 format! 的參數裡再呼叫 format!
+    let boxsize = format!(
+        "{:.1}×{:.1}×{:.1}",
+        box3d.size[0], box3d.size[1], box3d.size[2]
+    );
     let html = format!(
         r#"<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1237,6 +1268,10 @@ pub fn write_qa_html(
  .metrics{{display:flex;gap:15px;margin-top:6px;font-size:11.5px;color:var(--dim);
    font-variant-numeric:tabular-nums}}
  .metrics span:last-child{{margin-left:auto}}
+ .whyboxwarn{{margin-top:12px;padding:11px 15px;border-radius:9px;display:flex;gap:22px;flex-wrap:wrap;background:rgba(212,175,55,.07);border:1px solid rgba(212,175,55,.22)}}
+ .whyboxwarn h2{{margin:0;font-size:12px;color:var(--gold);align-self:center}}
+ .whyboxwarn ul{{list-style:none;margin:0;padding:0;display:flex;gap:20px;flex-wrap:wrap}}
+ .whyboxwarn li{{font-size:12px}} .whyboxwarn li b{{color:var(--gold);margin-right:6px}}
  .why{{margin-top:7px;padding:5px 9px;border-radius:6px;font-size:11px;
    background:rgba(248,113,113,.10);color:#fca5a5}}
  footer{{padding:16px 26px 30px;color:var(--dim);font-size:12px;line-height:1.9;
@@ -1269,10 +1304,11 @@ pub fn write_qa_html(
     <h2>略過原因分佈</h2>
     <ul>{reasons}</ul>
   </div>
+  {warnbox}
 </header>
 <div class="wrap"><div class="grid">{cards}</div></div>
 <footer>
-  共 {total} 張影格，本頁顯示前 {shown} 張（依「採用」優先排序）。完整逐影格明細見
+  {removed_note}共 {total} 張影格，本頁顯示前 {shown} 張（依「採用」優先排序）。完整逐影格明細見
   <code>annotations.csv</code>／<code>annotations.json</code>；包圍盒參數見 <code>box.json</code>。<br>
   上軸來源：{up}｜包圍盒中心 ({cx:.2}, {cy:.2}, {cz:.2})
 </footer>
@@ -1313,13 +1349,12 @@ pub fn write_qa_html(
         ratio = summary.acceptance_ratio * 100.0,
         corners = summary.median_visible_corners,
         area = summary.median_area_ratio * 100.0,
-        boxsize = format!(
-            "{:.1}×{:.1}×{:.1}",
-            box3d.size[0], box3d.size[1], box3d.size[2]
-        ),
+        boxsize = boxsize,
         reasons = reasons,
+        warnbox = warnbox,
         cards = cards,
         shown = shown,
+        removed_note = removed_note,
         up = match box3d.up_source {
             UpAxisSource::CameraTrajectory => "由相機軌跡推定",
             UpAxisSource::WorldY => "退回世界 Y 軸（軌跡退化，高度可能不準）",

@@ -127,6 +127,30 @@ enum Commands {
         #[arg(long, default_value = "work/frames")]
         frames_href: String,
     },
+    /// Merge this project's auto-annotations into a YOLO dataset.
+    ///
+    /// Closes the loop from capture to training: reads `annotation/labels/`,
+    /// copies the matching frames, and rewrites the class index to the
+    /// dataset's own numbering (source and dataset indices often differ).
+    ExportDataset {
+        /// Project directory that has already been annotated.
+        project: PathBuf,
+        /// Dataset root containing `data.yaml`, `images/`, `labels/`.
+        #[arg(long)]
+        into: PathBuf,
+        /// Target class name; must exist in the dataset's `names:` list.
+        #[arg(long)]
+        class: String,
+        /// Target split.
+        #[arg(long, default_value = "train")]
+        split: String,
+        /// Source tag to embed in filenames (for provenance).
+        #[arg(long, default_value = "splat")]
+        source: String,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Inspect the COLMAP snapshot point cloud (grows during mapping).
     ///
     /// This is what the in-app 3D view uses; the CLI form prints statistics so
@@ -520,6 +544,51 @@ async fn execute(cli: Cli) -> Result<()> {
                 }
                 std::fs::write(&path, out)?;
                 println!("已輸出 PLY：{}", path.display());
+            }
+        }
+        Commands::ExportDataset {
+            project,
+            into,
+            class,
+            split,
+            source,
+            dry_run,
+        } => {
+            use ooo_splat::reconstruction::export::{export_annotations, ExportOptions};
+
+            let report = export_annotations(
+                &project,
+                &into,
+                &ExportOptions {
+                    class_name: class,
+                    split,
+                    source,
+                    dry_run,
+                },
+            )
+            .map_err(|e| SplatError::Process(format!("匯出失敗：{e}")))?;
+
+            println!(
+                "{}類別「{}」（資料集索引 {}）→ {}/{}",
+                if dry_run { "[dry-run] " } else { "" },
+                report.class_name,
+                report.class_id,
+                report.dataset,
+                report.split
+            );
+            println!(
+                "  寫入影像 {}｜標籤 {}｜略過：已存在 {}、找不到影格 {}、標籤無效 {}",
+                report.images_written,
+                report.labels_written,
+                report.skipped_exists,
+                report.skipped_missing_frame,
+                report.skipped_invalid_label
+            );
+            if !report.samples.is_empty() {
+                println!("  範例：{}", report.samples.join("、"));
+            }
+            if !dry_run && report.images_written > 0 {
+                println!("  下一步：重新訓練 detector，資料集已更新");
             }
         }
     }

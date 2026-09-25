@@ -2,6 +2,7 @@ pub mod autolabel;
 pub mod cloud;
 pub mod colmap;
 pub mod edit_mask;
+pub mod export;
 pub mod inspect;
 pub mod ply;
 pub mod splat_transform;
