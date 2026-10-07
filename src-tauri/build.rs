@@ -16,10 +16,7 @@ fn main() {
         })
         .trim()
         .to_owned();
-    assert!(
-        !endpoint.is_empty(),
-        "telemetry endpoint configuration must not be empty"
-    );
+    // An unconfigured derivative build stays local; telemetry is optional.
     println!("cargo:rustc-env=OOOSPLAT_TELEMETRY_ENDPOINT={endpoint}");
 
     tauri_build::build()

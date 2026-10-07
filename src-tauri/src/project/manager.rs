@@ -251,8 +251,8 @@ fn validate_video_path(path: &Path) -> Result<()> {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("mp4" | "mov") => Ok(()),
-        _ => Err(SplatError::InvalidVideo("仅支持 MP4 或 MOV 文件".into())),
+        Some("mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm") => Ok(()),
+        _ => Err(SplatError::InvalidVideo("支持 MP4、MOV、M4V、AVI、MKV 或 WebM 视频；实际编码需 FFprobe/FFmpeg 可读取".into())),
     }
 }
 
@@ -362,6 +362,19 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn video_import_accepts_supported_containers_and_rejects_missing_or_other_files() {
+        let directory = tempfile::tempdir().unwrap();
+        for extension in ["mp4", "MOV", "m4v", "avi", "mkv", "webm"] {
+            let file = directory.path().join(format!("video.{extension}"));
+            std::fs::write(&file, b"test container path").unwrap();
+            assert!(validate_video_path(&file).is_ok());
+        }
+        let other = directory.path().join("source.txt");
+        std::fs::write(&other, b"not video").unwrap();
+        assert!(validate_video_path(&other).is_err());
+        assert!(validate_video_path(&directory.path().join("missing.mp4")).is_err());
+    }
     #[test]
     fn sanitizes_windows_names() {
         assert_eq!(sanitize_project_name("房子:轨迹?.mp4"), "房子_轨迹_.mp4");

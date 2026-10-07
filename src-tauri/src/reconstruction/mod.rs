@@ -1,4 +1,6 @@
 pub mod autolabel;
+pub mod annotation_quality;
+pub mod target_selection;
 pub mod cloud;
 pub mod colmap;
 pub mod edit_mask;

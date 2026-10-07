@@ -197,7 +197,15 @@ export interface AnnotationOutcome {
   acceptanceRatio: number;
   boxSize: [number, number, number];
   boxCenter: [number, number, number];
-  upAxisEstimated: boolean;
+  upSource: "cameraTrajectory" | "worldY" | "manual";
+  upAxisMayBeWrong: boolean;
+  labelsRemoved: number;
+  warnings: [string, number][];
+  reviewQueue: string;
+  seedEditor: string;
+  candidateFrames: number;
+  reviewFrames: number;
+  rejectedFrames: number;
   labelsWritten: number;
   rejectionReasons: [string, number][];
 }

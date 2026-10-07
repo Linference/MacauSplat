@@ -11,14 +11,20 @@ import { previewAssetUrl } from "./previewAssetUrl";
 const inTauri = () => "__TAURI_INTERNALS__" in window;
 
 export async function selectVideo(): Promise<string | null> {
-  if (!inTauri()) return null;
+  if (!inTauri()) throw new Error(translate(getCurrentLocale(), "input.desktopOnly"));
   const locale = getCurrentLocale();
-  const selected = await open({ title: translate(locale, "dialog.selectVideoTitle"), multiple: false, directory: false, filters: [{ name: translate(locale, "input.video"), extensions: ["mp4", "mov"] }] });
+  const selected = await open({ title: translate(locale, "dialog.selectVideoTitle"), multiple: false, directory: false, filters: [{ name: translate(locale, "input.video"), extensions: ["mp4", "mov", "m4v", "avi", "mkv", "webm"] }] });
+  return typeof selected === "string" ? selected : null;
+}
+
+export async function selectAnnotationSeeds(): Promise<string | null> {
+  if (!inTauri()) throw new Error(translate(getCurrentLocale(), "input.desktopOnly"));
+  const selected = await open({ title: translate(getCurrentLocale(), "annotation.selectSeeds"), multiple: false, directory: false, filters: [{ name: "JSON", extensions: ["json"] }] });
   return typeof selected === "string" ? selected : null;
 }
 
 export async function selectImageSequence(): Promise<string | null> {
-  if (!inTauri()) return null;
+  if (!inTauri()) throw new Error(translate(getCurrentLocale(), "input.desktopOnly"));
   const locale = getCurrentLocale();
   const selected = await open({ title: translate(locale, "dialog.selectImagesTitle"), multiple: false, directory: true });
   return typeof selected === "string" ? selected : null;
@@ -156,7 +162,7 @@ export async function getSnapshotCloud(projectPath: string, maxPoints = 60_000):
  * 對已完成的專案執行自動標註：擬合三維包圍盒 → 投影到每張影格 → 輸出 YOLO 標籤。
  * 輸出到 `<專案>/annotation/`，回傳摘要供介面顯示。
  */
-export async function annotateProject(projectPath: string, classId = 0): Promise<AnnotationOutcome> {
+export async function annotateProject(projectPath: string, classId = 0, seedsPath: string | null = null): Promise<AnnotationOutcome> {
   if (!inTauri()) throw new Error("自動標註需要在桌面應用中執行");
-  return invoke<AnnotationOutcome>("annotate_project", { projectPath, classId });
+  return invoke<AnnotationOutcome>("annotate_project", { projectPath, classId, seedsPath });
 }

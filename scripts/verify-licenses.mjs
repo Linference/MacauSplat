@@ -85,11 +85,13 @@ assert(
 
 const cargo = readText("src-tauri/Cargo.toml");
 assert(/^license\s*=\s*"Apache-2\.0"\s*$/m.test(cargo), "Cargo.toml must declare Apache-2.0.");
-assert(/^authors\s*=\s*\["ooolabdev"\]\s*$/m.test(cargo), "Cargo.toml must identify ooolabdev as author.");
+const cargoAuthors = cargo.match(/^authors\s*=\s*\[([^\]]+)\]\s*$/m)?.[1] ?? "";
+assert(cargoAuthors.includes('"Linference"') && cargoAuthors.includes('"ooolabdev"'), "Cargo.toml must credit the fork maintainer and upstream author.");
 assert(
-  /^repository\s*=\s*"https:\/\/github\.com\/ooolabdev\/ooosplat"\s*$/m.test(cargo),
-  "Cargo.toml repository URL is incorrect.",
+  /^repository\s*=\s*"https:\/\/github\.com\/Linference\/MacauSplat"\s*$/m.test(cargo),
+  "Cargo.toml must identify the fork as its own repository.",
 );
+assert(cargo.includes('[package.metadata.upstream]') && cargo.includes('repository = "https://github.com/ooolabdev/ooosplat"'), "Cargo.toml must preserve explicit upstream provenance.");
 
 for (const resource of [
   "../LICENSE",

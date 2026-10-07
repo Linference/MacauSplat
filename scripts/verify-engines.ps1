@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'file-hash.ps1')
 $workspace = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $workspace 'engines\manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Missing engine manifest: $manifestPath" }
@@ -14,7 +15,7 @@ if ($cudaCompatibility.minimumComputeCapability -notmatch '^\d+\.\d+$') { throw 
 foreach ($item in $manifest.requiredFiles) {
   $path = Join-Path $workspace $item.path
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing engine file: $($item.path). Run 'npm run setup:engines' first." }
-  $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+  $actual = Get-LockedFileSha256 -LiteralPath $path
   if ($actual -ne $item.sha256) { throw "Hash mismatch for $($item.path): $actual" }
 }
 # CUDA build must ship its NVIDIA runtime DLLs; requiredFiles hash-locks them,

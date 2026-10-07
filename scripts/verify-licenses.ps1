@@ -89,8 +89,11 @@ Assert-True ($package.upstream.url -eq "https://github.com/ooolabdev/ooosplat") 
 
 $cargo = Read-Utf8Text "src-tauri/Cargo.toml"
 Assert-True ([regex]::IsMatch($cargo, '(?m)^license\s*=\s*"Apache-2\.0"\s*$')) "Cargo.toml must declare Apache-2.0."
-Assert-True ([regex]::IsMatch($cargo, '(?m)^authors\s*=\s*\["ooolabdev"\]\s*$')) "Cargo.toml must identify ooolabdev as author."
-Assert-True ([regex]::IsMatch($cargo, '(?m)^repository\s*=\s*"https://github\.com/ooolabdev/ooosplat"\s*$')) "Cargo.toml repository URL is incorrect."
+$authors = [regex]::Match($cargo, '(?m)^authors\s*=\s*\[([^\]]+)\]\s*$').Groups[1].Value
+Assert-True ($authors.Contains('"Linference"') -and $authors.Contains('"ooolabdev"')) "Cargo.toml must credit the fork maintainer and upstream author."
+Assert-True ([regex]::IsMatch($cargo, '(?m)^repository\s*=\s*"https://github\.com/Linference/MacauSplat"\s*$')) "Cargo.toml must identify this fork."
+Assert-Contains $cargo '[package.metadata.upstream]' 'Cargo.toml'
+Assert-Contains $cargo 'repository = "https://github.com/ooolabdev/ooosplat"' 'Cargo.toml upstream provenance'
 
 $tauri = (Read-Utf8Text "src-tauri/tauri.conf.json") | ConvertFrom-Json
 Assert-True ($tauri.bundle.license -eq "Apache-2.0") "Tauri bundle license must be Apache-2.0."
