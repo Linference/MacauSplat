@@ -77,6 +77,11 @@ enum Commands {
         /// Use the world Y axis as "up" instead of inferring it from the trajectory.
         #[arg(long)]
         no_infer_up: bool,
+        /// Human seed rectangles from seed-editor.html; at least two registered views.
+        #[arg(long)]
+        seeds: Option<PathBuf>,
+        #[arg(long, default_value_t = 2)]
+        min_seed_support: usize,
     },
     /// Project a 3D box into every registered frame and write YOLO labels.
     ///
@@ -322,6 +327,8 @@ async fn execute(cli: Cli) -> Result<()> {
             out,
             trim,
             no_infer_up,
+            seeds,
+            min_seed_support,
         } => {
             use ooo_splat::reconstruction::autolabel::{fit_box_from_points, FitOptions};
             use ooo_splat::reconstruction::colmap::SparseReconstruction;
@@ -334,13 +341,20 @@ async fn execute(cli: Cli) -> Result<()> {
                 infer_up: !no_infer_up,
                 ..FitOptions::default()
             };
-            let box3d = fit_box_from_points(&reconstruction, &options)
+            let selection = seeds.as_ref().map(|path| -> Result<_> {
+                let seeds = serde_json::from_slice::<ooo_splat::reconstruction::target_selection::SeedDocument>(&std::fs::read(path)?)?;
+                ooo_splat::reconstruction::target_selection::select_target_points(&reconstruction, &seeds, min_seed_support).map_err(SplatError::Process)
+            }).transpose()?;
+            let box3d = if let Some(target) = &selection {
+                ooo_splat::reconstruction::autolabel::fit_box_from_xyz(&target.points, &reconstruction.images, &options)
+            } else { fit_box_from_points(&reconstruction, &options) }
                 .map_err(|e| SplatError::Process(format!("自動擬合包圍盒失敗：{e}")))?;
             std::fs::create_dir_all(&out)?;
             let path = out.join("box.json");
             std::fs::write(&path, serde_json::to_string_pretty(&box3d)?)?;
+            if let Some(target) = selection { std::fs::write(out.join("target-selection.json"), serde_json::to_vec_pretty(&target)?)?; }
             println!(
-                "包圍盒：{:.2} × {:.2} × {:.2} m，中心 [{:.2}, {:.2}, {:.2}]，上軸：{}，取自 {} 個點",
+                "包圍盒：{:.2} × {:.2} × {:.2} 重建單位（未校準），中心 [{:.2}, {:.2}, {:.2}]，上軸：{}，取自 {} 個點",
                 box3d.size[0],
                 box3d.size[1],
                 box3d.size[2],
@@ -408,6 +422,9 @@ async fn execute(cli: Cli) -> Result<()> {
                 &box3d,
                 qa_limit,
             )?;
+            let quality = ooo_splat::reconstruction::annotation_quality::assess(&reconstruction, &box3d, &annotations);
+            ooo_splat::reconstruction::annotation_quality::write_report(&out, &frames_href, &quality, qa_limit)?;
+            println!("複核分級：候選 {} · 需複核 {} · 暫不使用 {}（啟發式，不是準確率）", quality.candidate_frames, quality.review_frames, quality.rejected_frames);
             println!(
                 "影格 {} 張 → 採用 {} 張（{:.1}%），已寫出 {} 個 YOLO 標籤",
                 summary.frames_total,

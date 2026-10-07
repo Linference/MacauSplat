@@ -8,7 +8,8 @@
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build:bundle",
     "frontendDist": "../dist"
-  },  "app": {
+  },
+  "app": {
     "windows": [
       {
         "title": "MacauSplat",
@@ -74,7 +75,7 @@
     "publisher": "Linference",
     "copyright": "Copyright © 2026 Linference. 基於 OOOSplat（Apache-2.0）的衍生作品。",
     "category": "GraphicsAndDesign",
-    "shortDescription": "從環繞影片生成 3DGS，並自動產出帶精確標註的建築資料集",
-    "longDescription": "MacauSplat 把一段環繞拍攝的影片轉成兩種成果：可瀏覽的三維高斯潑濺模型，以及帶精確標註的建築資料集。重建沿用開源工具（FFmpeg、COLMAP、Brush）；本作品的貢獻在重建之後的自動標註階段——由 COLMAP 的相機位姿與稀疏點雲投影出幾何一致、可稽核的二維標註，並內建建圖過程的即時三維點雲檢視。"
+    "shortDescription": "从环绕素材生成 3DGS，辅助制作与复核建筑标注",
+    "longDescription": "MacauSplat 沿用 FFmpeg、COLMAP、Brush 的开源重建流程，在重建后提供少量人工目标框约束、几何投影标注、按视角分组的复核队列与数据集导出。标注分级为启发式提示，质量与识别效果需独立实验验证。"
   }
 }

@@ -12,7 +12,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn(), open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 
-import { checkColmapAcceleration, getAppRuntimeStatus, revealProject, revealProjectLogs } from "./backend";
+import { annotateProject, selectVideo, selectImageSequence, selectAnnotationSeeds, checkColmapAcceleration, getAppRuntimeStatus, revealProject, revealProjectLogs } from "./backend";
 
 describe("backend browser guards", () => {
   beforeEach(() => {
@@ -23,6 +23,20 @@ describe("backend browser guards", () => {
   it("does not invoke the acceleration command outside Tauri", async () => {
     await expect(checkColmapAcceleration()).resolves.toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("explains why media cannot be imported in a browser preview", async () => {
+    for (const select of [selectVideo, selectImageSequence, selectAnnotationSeeds]) {
+      await expect(select()).rejects.toThrow(/MacauSplat/);
+    }
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("passes seed constraints to the desktop annotation command", async () => {
+    (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    mocks.invoke.mockResolvedValue({});
+    await annotateProject("project", 4, "target-seeds.json");
+    expect(mocks.invoke).toHaveBeenCalledWith("annotate_project", { projectPath: "project", classId: 4, seedsPath: "target-seeds.json" });
   });
 
   it("uses validated backend commands for runtime state and project folders", async () => {

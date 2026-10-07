@@ -9,6 +9,7 @@ import { LanguageProvider, translate } from "../i18n";
 import type { ProjectSummary } from "../types/pipeline";
 
 const mocks = vi.hoisted(() => ({
+  selectAnnotationSeeds: vi.fn().mockResolvedValue(null),
   annotateProject: vi.fn(),
   cancelPipeline: vi.fn(),
   estimateProjectRuntime: vi.fn(),
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../lib/backend", () => ({
+  selectAnnotationSeeds: mocks.selectAnnotationSeeds,
   annotateProject: mocks.annotateProject,
   cancelPipeline: mocks.cancelPipeline,
   checkEngines: vi.fn().mockResolvedValue([]),
@@ -712,7 +714,9 @@ describe("App preview workspace", () => {
       acceptanceRatio: 0.179,
       boxSize: [12.7, 12.27, 3.54],
       boxCenter: [0, 0, 0],
-      upAxisEstimated: false,
+      upSource: "worldY", upAxisMayBeWrong: true,
+      reviewQueue: "C:/project/annotation/review-queue.html", seedEditor: "C:/project/annotation/seed-editor.html",
+      candidateFrames: 2, reviewFrames: 47, rejectedFrames: 224, labelsRemoved: 0, warnings: [],
       labelsWritten: 49,
       rejectionReasons: [["insufficient corners", 215]],
     });
@@ -750,13 +754,22 @@ describe("App preview workspace", () => {
     await act(async () => (target as HTMLButtonElement).click());
     await flush();
 
-    expect(mocks.annotateProject).toHaveBeenCalledWith(projectPath, 0);
+    expect(mocks.annotateProject).toHaveBeenCalledWith(projectPath, 0, null);
     const panel = container.querySelector(".annotation-result");
     expect(panel).not.toBeNull();
     // 摘要須包含採用的影格數、總影格數與包圍盒尺寸
     expect(panel?.textContent).toContain("49");
     expect(panel?.textContent).toContain("273");
     expect(panel?.textContent).toContain("12.70");
+    expect(panel?.textContent).not.toContain("12.70 × 12.27 × 3.54 m");
+    expect(panel?.textContent).toContain(translate("zh-CN", "annotation.upEstimated"));
+    expect(panel?.textContent).toContain("建议复核 47 张");
+    mocks.selectAnnotationSeeds.mockResolvedValueOnce("target-seeds.json");
+    const seededButton = Array.from(panel!.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.includes(translate("zh-CN", "annotation.seedRun")));
+    expect(seededButton).toBeTruthy();
+    await act(async () => seededButton!.click());
+    await flush();
+    expect(mocks.annotateProject).toHaveBeenLastCalledWith(projectPath, 0, "target-seeds.json");
   });
 
   it("does not send a second annotation command while one is in flight", async () => {
@@ -799,7 +812,9 @@ describe("App preview workspace", () => {
         acceptanceRatio: 1,
         boxSize: [1, 1, 1],
         boxCenter: [0, 0, 0],
-        upAxisEstimated: false,
+        upSource: "worldY", upAxisMayBeWrong: true,
+      reviewQueue: "C:/project/annotation/review-queue.html", seedEditor: "C:/project/annotation/seed-editor.html",
+      candidateFrames: 2, reviewFrames: 47, rejectedFrames: 224, labelsRemoved: 0, warnings: [],
         labelsWritten: 10,
         rejectionReasons: [],
       });
@@ -817,7 +832,9 @@ describe("App preview workspace", () => {
       acceptanceRatio: 1,
       boxSize: [2, 2, 2],
       boxCenter: [0, 0, 0],
-      upAxisEstimated: false,
+      upSource: "worldY", upAxisMayBeWrong: true,
+      reviewQueue: "C:/project/annotation/review-queue.html", seedEditor: "C:/project/annotation/seed-editor.html",
+      candidateFrames: 2, reviewFrames: 47, rejectedFrames: 224, labelsRemoved: 0, warnings: [],
       labelsWritten: 20,
       rejectionReasons: [],
     });

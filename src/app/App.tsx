@@ -10,7 +10,7 @@ import { TelemetryPreferences } from "../components/TelemetryPreferences";
 import {
   cancelPipeline, checkEngines, confirmAndDeleteProject, confirmLargeImageSequence,
   annotateProject, estimateProjectRuntime, exportPly, getAppRuntimeStatus, getProjectOverview, onPipelineEvent, probeAndPlan, revealFile, revealProject, revealProjectLogs,
-  selectImageSequence, selectProjectsRoot, selectVideo,
+  selectImageSequence, selectProjectsRoot, selectVideo, selectAnnotationSeeds,
   setProjectsRoot, startPipeline, prepareGaussianPreview, releaseGaussianPreview,
   initializeTelemetry, setTelemetryConsent, resumePipeline,
 } from "../lib/backend";
@@ -787,14 +787,16 @@ export function App() {
    * 連點兩下會送出兩個命令，而 Rust 端兩次都寫同一個 `<專案>/annotation/`，
    * 標籤檔會交錯。ref 是同步的，第二次點擊直接返回。
    */
-  const runAnnotation = useCallback(async () => {
+  const runAnnotation = useCallback(async (useSeeds = false) => {
     const projectPath = store.result?.projectPath;
     if (!projectPath || annotationPending.current) return;
     annotationPending.current = true;
     setAnnotating(true);
     setAnnotationError(null);
     try {
-      const outcome = await annotateProject(projectPath, 0);
+      const seedsPath = useSeeds ? await selectAnnotationSeeds() : null;
+      if (useSeeds && !seedsPath) return;
+      const outcome = await annotateProject(projectPath, 0, seedsPath);
       setAnnotation({ projectPath, outcome });
     } catch (cause) {
       // 失敗時清掉舊結果：不同專案的舊摘要比沒有摘要更容易誤導
@@ -964,11 +966,15 @@ export function App() {
                 accepted: formatNumber(matchingAnnotation.outcome.framesAccepted),
                 total: formatNumber(matchingAnnotation.outcome.framesTotal),
                 ratio: `${(matchingAnnotation.outcome.acceptanceRatio * 100).toFixed(1)}%`,
-                size: matchingAnnotation.outcome.boxSize.map((value) => value.toFixed(2)).join(" × ") + " m",
+                size: matchingAnnotation.outcome.boxSize.map((value) => value.toFixed(2)).join(" × "),
               })}</p>
               <p>{t("annotation.labels", { count: formatNumber(matchingAnnotation.outcome.labelsWritten) })}</p>
-              {matchingAnnotation.outcome.upAxisEstimated && <p className="annotation-warning">{t("annotation.upEstimated")}</p>}
+              <p>{t("annotation.quality", { candidate: matchingAnnotation.outcome.candidateFrames, review: matchingAnnotation.outcome.reviewFrames, rejected: matchingAnnotation.outcome.rejectedFrames })}</p>
+              {matchingAnnotation.outcome.upAxisMayBeWrong && <p className="annotation-warning">{t("annotation.upEstimated")}</p>}
               <div className="completion-result-actions">
+                <button type="button" disabled={annotating} onClick={() => void runAnnotation(true)}><Tags size={14} />{t("annotation.seedRun")}</button>
+                <button type="button" onClick={() => void revealFile(matchingAnnotation.outcome.seedEditor)}><FolderOpen size={14} />{t("annotation.seedEditor")}</button>
+                <button type="button" onClick={() => void revealFile(matchingAnnotation.outcome.reviewQueue)}><FolderOpen size={14} />{t("annotation.reviewQueue")}</button>
                 <button type="button" onClick={() => void revealFile(matchingAnnotation.outcome.qaHtml)}><FolderOpen size={14} />{t("annotation.openFolder")}</button>
               </div>
               <p className="annotation-hint">{t("annotation.qaHint")}</p>
@@ -1036,7 +1042,7 @@ export function App() {
       </div>
     </div>}
     {failureDialog && <FailureGuidanceDialog failure={failureDialog} action={failureDialogAction} onClose={closeFailureDialog} onRetry={() => void retryFailedProject()} onOpenLogs={() => void openFailureLogs()} />}
-    {telemetryPreferences && !telemetryPreferences.consentDecided && <TelemetryPreferences mode="consent" preferences={telemetryPreferences} busy={telemetryBusy} onChange={(enabled) => void changeTelemetryConsent(enabled)} />}
+    {telemetryPreferences && telemetryPreferences.deliveryStatus !== "notConfigured" && !telemetryPreferences.consentDecided && <TelemetryPreferences mode="consent" preferences={telemetryPreferences} busy={telemetryBusy} onChange={(enabled) => void changeTelemetryConsent(enabled)} />}
     {telemetryPreferences && privacySettingsOpen && <TelemetryPreferences mode="settings" preferences={telemetryPreferences} busy={telemetryBusy} onChange={(enabled) => void changeTelemetryConsent(enabled)} onClose={() => setPrivacySettingsOpen(false)} />}
   </main>;
 }

@@ -1074,7 +1074,7 @@ pub async fn begin_gaussian_video_export(
         .is_none_or(|session| session.project_id != project_id)
     {
         return Err(SplatError::Process(
-            "该项目当前未在 OOOSplat 预览中打开，无法导出视频。".into(),
+            "该项目当前未在 MacauSplat 预览中打开，无法导出视频。".into(),
         ));
     }
     drop(active);
@@ -1236,6 +1236,9 @@ mod tests {
     #[test]
     fn annotation_outcome_exposes_camel_case_fields_and_the_up_axis_source() {
         let outcome = AnnotationOutcome {
+            review_queue: "C:/p/annotation/review-queue.html".into(),
+            seed_editor: "C:/p/annotation/seed-editor.html".into(),
+            candidate_frames: 6, review_frames: 18, rejected_frames: 6,
             output_dir: "C:/p/annotation".into(),
             qa_html: "C:/p/annotation/qa.html".into(),
             frames_total: 30,
@@ -1483,6 +1486,11 @@ pub async fn list_project_snapshots(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationOutcome {
+    pub review_queue: String,
+    pub seed_editor: String,
+    pub candidate_frames: usize,
+    pub review_frames: usize,
+    pub rejected_frames: usize,
     /// 輸出目錄（標籤、明細、複核表都在這裡）。
     pub output_dir: String,
     /// 人工複核用的 HTML 路徑。
@@ -1490,7 +1498,7 @@ pub struct AnnotationOutcome {
     pub frames_total: usize,
     pub frames_accepted: usize,
     pub acceptance_ratio: f64,
-    /// 擬合出的包圍盒尺寸（公尺）。
+    /// 擬合出的包圍盒尺寸（未校準的重建單位）。
     pub box_size: [f64; 3],
     pub box_center: [f64; 3],
     /// 上軸的來源（`cameraTrajectory`／`worldY`／`manual`）。
@@ -1524,6 +1532,7 @@ pub struct AnnotationOutcome {
 pub async fn annotate_project(
     project_path: String,
     class_id: Option<usize>,
+    seeds_path: Option<String>,
 ) -> std::result::Result<AnnotationOutcome, SplatError> {
     use crate::reconstruction::autolabel::{
         annotate_reconstruction, fit_box_from_points, summarize, write_annotations_csv,
@@ -1539,7 +1548,13 @@ pub async fn annotate_project(
         let reconstruction = SparseReconstruction::load(project.join("work/colmap"))
             .or_else(|_| SparseReconstruction::load(&project))
             .map_err(|e| SplatError::Process(format!("讀取稀疏重建失敗：{e}")))?;
-        let box3d = fit_box_from_points(&reconstruction, &FitOptions::default())
+        let selection = seeds_path.as_ref().map(|path| -> std::result::Result<_, SplatError> {
+            let seeds = serde_json::from_slice::<crate::reconstruction::target_selection::SeedDocument>(&std::fs::read(path)?)?;
+            crate::reconstruction::target_selection::select_target_points(&reconstruction, &seeds, 2).map_err(SplatError::Process)
+        }).transpose()?;
+        let box3d = if let Some(target) = &selection {
+            crate::reconstruction::autolabel::fit_box_from_xyz(&target.points, &reconstruction.images, &FitOptions::default())
+        } else { fit_box_from_points(&reconstruction, &FitOptions::default()) }
             .map_err(|e| SplatError::Process(format!("自動擬合包圍盒失敗：{e}")))?;
         let annotations =
             annotate_reconstruction(&reconstruction, &box3d, &AnnotateOptions::default());
@@ -1563,8 +1578,16 @@ pub async fn annotate_project(
         let frames_href = inspect::frames_href(&project, &output_dir)
             .unwrap_or_else(|| inspect::FALLBACK_FRAMES_HREF.to_string());
         write_qa_html(&qa_html, &frames_href, &annotations, &summary, &box3d, 60)?;
+        let quality = crate::reconstruction::annotation_quality::assess(&reconstruction, &box3d, &annotations);
+        crate::reconstruction::annotation_quality::write_report(&output_dir, &frames_href, &quality, 60)?;
+        if let Some(target) = selection { std::fs::write(output_dir.join("target-selection.json"), serde_json::to_vec_pretty(&target)?)?; }
 
         Ok(AnnotationOutcome {
+            review_queue: output_dir.join("review-queue.html").display().to_string(),
+            seed_editor: output_dir.join("seed-editor.html").display().to_string(),
+            candidate_frames: quality.candidate_frames,
+            review_frames: quality.review_frames,
+            rejected_frames: quality.rejected_frames,
             output_dir: output_dir.display().to_string(),
             qa_html: qa_html.display().to_string(),
             frames_total: summary.frames_total,

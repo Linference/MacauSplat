@@ -4,6 +4,7 @@ param(
   [string]$CacheDirectory
 )
 
+. (Join-Path $PSScriptRoot 'file-hash.ps1')
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $workspace 'engines\manifest.json'
@@ -34,7 +35,7 @@ function Test-RequiredFiles($Engine, [string]$Destination) {
   foreach ($item in $required) {
     $path = Join-Path $workspace $item.path
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $item.sha256) { return $false }
+    if ((Get-LockedFileSha256 -LiteralPath $path) -ne $item.sha256) { return $false }
   }
   return $true
 }
@@ -53,7 +54,7 @@ foreach ($engine in $manifest.engines) {
   $archivePath = Join-Path $CacheDirectory $install.archiveName
   $download = $true
   if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
-    $download = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -ne $engine.archiveSha256
+    $download = (Get-LockedFileSha256 -LiteralPath $archivePath) -ne $engine.archiveSha256
     if ($download) {
       Write-Warning "Cached archive hash changed; downloading a clean copy for $($engine.name)."
       Remove-Item -LiteralPath $archivePath -Force
@@ -67,7 +68,7 @@ foreach ($engine in $manifest.engines) {
     Write-Host "Using cached archive: $($install.archiveName)"
   }
 
-  $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+  $archiveHash = (Get-LockedFileSha256 -LiteralPath $archivePath)
   if ($archiveHash -ne $engine.archiveSha256) {
     throw "Archive hash mismatch for $($engine.name). Expected $($engine.archiveSha256), got $archiveHash. The upstream asset may have changed; update manifest.json only after reviewing the new release."
   }

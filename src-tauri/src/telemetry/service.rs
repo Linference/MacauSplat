@@ -14,7 +14,10 @@ use super::event::{validate_privacy, TelemetryEvent, TelemetryPayload};
 
 /// The production endpoint is compiled from `config/telemetry-endpoint.txt` by `build.rs`.
 /// Invalid or non-HTTPS configuration fails closed and disables network delivery.
-pub const TELEMETRY_ENDPOINT: Option<&str> = option_env!("OOOSPLAT_TELEMETRY_ENDPOINT");
+pub const TELEMETRY_ENDPOINT: Option<&str> = match option_env!("OOOSPLAT_TELEMETRY_ENDPOINT") {
+    Some(value) if !value.is_empty() => Some(value),
+    _ => None,
+};
 const TELEMETRY_TIMEOUT: Duration = Duration::from_secs(4);
 const TELEMETRY_SCHEMA_VERSION: u32 = 2;
 const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -53,8 +56,8 @@ impl Default for TelemetryConfig {
         Self {
             schema_version: TELEMETRY_SCHEMA_VERSION,
             install_id: Uuid::new_v4(),
-            analytics_enabled: true,
-            consent_decided: true,
+            analytics_enabled: false,
+            consent_decided: false,
             last_heartbeat_date: None,
             last_heartbeat_app_version: None,
         }
@@ -364,7 +367,7 @@ mod tests {
     #[test]
     fn production_endpoint_is_compiled_from_the_public_project_config() {
         let configured = include_str!("../../../config/telemetry-endpoint.txt").trim();
-        assert_eq!(TELEMETRY_ENDPOINT, Some(configured));
+        assert_eq!(TELEMETRY_ENDPOINT, if configured.is_empty() { None } else { Some(configured) });
     }
 
     #[tokio::test]
@@ -381,8 +384,8 @@ mod tests {
         second.preferences().await.unwrap();
         let second_config = second.state.lock().await.config.clone().unwrap();
         assert_eq!(first_config.install_id, second_config.install_id);
-        assert!(second_config.analytics_enabled);
-        assert!(second_config.consent_decided);
+        assert!(!second_config.analytics_enabled);
+        assert!(!second_config.consent_decided);
     }
 
     #[tokio::test]
@@ -488,6 +491,7 @@ mod tests {
             delivery: Delivery::Disabled,
         };
 
+        service.set_consent(true).await.unwrap();
         assert!(service.preferences().await.unwrap().analytics_enabled);
         assert!(
             !service
