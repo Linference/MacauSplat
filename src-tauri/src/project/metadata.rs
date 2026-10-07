@@ -6,11 +6,13 @@ use uuid::Uuid;
 
 use crate::{
     pipeline::PipelineStage,
-    presets::Quality,
-    video::{FramePlan, ImageSequenceInfo, VideoInfo},
+    planner::BridgeBackfillCheckpoint,
+    presets::{PlannerResolutionPlan, Quality, ResolvedBrushTrainingPreset},
+    video::{FramePlan, ImageSequenceInfo, PlannedFrame, VideoInfo},
 };
 
 pub const PROJECT_APP_ID: &str = "studio.ooo.splat";
+pub const COLMAP_INPUT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,9 +53,9 @@ impl GaussianTransform {
                 "Transform 包含无效数值".into(),
             ));
         }
-        if !(0.001..=1000.0).contains(&self.scale) {
+        if !(0.001..=10_000.0).contains(&self.scale) {
             return Err(crate::error::SplatError::Process(
-                "Uniform Scale 必须位于 0.001–1000 之间".into(),
+                "Uniform Scale 必须位于 0.001–10000 之间".into(),
             ));
         }
         Ok(self)
@@ -162,7 +164,7 @@ pub struct ProjectOutput {
     pub points_3d: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMetadata {
     #[serde(default = "schema_version")]
@@ -170,6 +172,10 @@ pub struct ProjectMetadata {
     #[serde(default)]
     pub app_id: String,
     pub id: Uuid,
+    /// Stable frontend draft identity used to reconcile a running task with
+    /// the project created by the pipeline. Older projects do not have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_task_id: Option<Uuid>,
     #[serde(default)]
     pub name: String,
     pub created_at: DateTime<Utc>,
@@ -199,17 +205,53 @@ pub struct ProjectMetadata {
     pub transform: GaussianTransform,
     #[serde(default)]
     pub editing: GaussianEditing,
+    /// 高清补拍溯源：仅当本项目由补拍派生时存在。源项目始终只读。
+    #[serde(default)]
+    pub reshoot: Option<ReshootProvenance>,
+}
+
+/// Where a derived reshoot project came from, and what was added to it.
+///
+/// The source project stays read-only: this records the paths the derivation
+/// read, so it is auditable, and it never implies the source was modified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshootProvenance {
+    pub source_project_id: Uuid,
+    pub source_project_path: PathBuf,
+    /// The source's `final.ply`, kept as a reference for the user.
+    pub source_final_ply: PathBuf,
+    /// The reshoot media the user supplied.
+    pub reshoot_source_path: PathBuf,
+    #[serde(default)]
+    pub camera_id: u32,
+    #[serde(default)]
+    pub camera_model: String,
+    #[serde(default)]
+    pub width: u64,
+    #[serde(default)]
+    pub height: u64,
+    #[serde(default)]
+    pub has_alpha: bool,
+    #[serde(default)]
+    pub mask_count: u64,
+    #[serde(default)]
+    pub source_image_count: u64,
+    #[serde(default)]
+    pub reshoot_frame_count: u64,
+    #[serde(default)]
+    pub registered_reshoot_count: u64,
 }
 
 pub const fn schema_version() -> u32 {
-    5
+    7
 }
 
 fn default_model() -> String {
     "final.ply".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameState {
     pub retention_ratio: f64,
@@ -222,6 +264,29 @@ pub struct FrameState {
     pub mask_count: Option<u64>,
     #[serde(default)]
     pub has_alpha: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colmap_input_version: Option<u32>,
+    #[serde(default)]
+    pub initial_extracted_frames: u64,
+    #[serde(default)]
+    pub selected_frames: Vec<PlannedFrame>,
+    #[serde(default)]
+    pub candidate_frames: Vec<PlannedFrame>,
+    #[serde(default)]
+    pub rescue_max_frames: u64,
+    #[serde(default)]
+    pub minimum_frame_override_applied: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrushTrainingCheckpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_resolved: Option<ResolvedBrushTrainingPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<ResolvedBrushTrainingPreset>,
+    #[serde(default)]
+    pub oom_retry_used: bool,
 }
 
 impl From<&FramePlan> for FrameState {
@@ -234,6 +299,12 @@ impl From<&FramePlan> for FrameState {
             image_format: None,
             mask_count: None,
             has_alpha: false,
+            colmap_input_version: Some(COLMAP_INPUT_VERSION),
+            initial_extracted_frames: plan.estimated_frames,
+            selected_frames: plan.selected_frames.clone(),
+            candidate_frames: plan.candidate_frames.clone(),
+            rescue_max_frames: plan.rescue_max_frames,
+            minimum_frame_override_applied: plan.minimum_frame_override_applied,
         }
     }
 }
@@ -241,6 +312,8 @@ impl From<&FramePlan> for FrameState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineStateFile {
+    #[serde(default)]
+    pub configuration: Option<crate::presets::PipelineOptimizationConfig>,
     pub stage: PipelineStage,
     pub preset: Quality,
     pub video: Option<VideoInfo>,
@@ -249,6 +322,23 @@ pub struct PipelineStateFile {
     #[serde(default)]
     pub image_sequence: Option<ImageSequenceInfo>,
     pub frames: Option<FrameState>,
+    /// Missing on pre-v2 projects, which deliberately resume through the
+    /// legacy pipeline rather than silently changing their reconstruction.
+    #[serde(default)]
+    pub planner_enabled: bool,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub precision_policy_version:Option<u32>,
+    /// Present only on projects created after the staged-resolution policy was
+    /// introduced. Its absence deliberately keeps older checkpoints on their
+    /// original resolution behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_policy_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_plan: Option<PlannerResolutionPlan>,
+    #[serde(default)]
+    pub bridge_backfill: BridgeBackfillCheckpoint,
+    #[serde(default)]
+    pub brush_training: BrushTrainingCheckpoint,
     pub features_complete: bool,
     pub matching_complete: bool,
     pub reconstruction_complete: bool,
@@ -259,6 +349,30 @@ pub struct PipelineStateFile {
     #[serde(default)]
     pub annotation_complete: bool,
     pub brush_complete: bool,
+    #[serde(default)]
+    pub reshoot: Option<ReshootState>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReshootState {
+    pub source_snapshot_complete: bool,
+    pub supplemental_frames_complete: bool,
+    pub supplemental_features_complete: bool,
+    pub incremental_matching_complete: bool,
+    pub incremental_reconstruction_complete: bool,
+    #[serde(default)]
+    pub source_image_count: u64,
+    #[serde(default)]
+    pub reshoot_frame_count: u64,
+    #[serde(default)]
+    pub mask_count: u64,
+    #[serde(default)]
+    pub has_alpha: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colmap_input_version: Option<u32>,
+    #[serde(default)]
+    pub registered_reshoot_count: u64,
 }
 
 impl PipelineStateFile {
@@ -268,17 +382,25 @@ impl PipelineStateFile {
 
     pub fn created_for(preset: Quality, input_type: ProjectInputType) -> Self {
         Self {
+            configuration: None,
             stage: PipelineStage::Created,
             preset,
             video: None,
             input_type,
             image_sequence: None,
             frames: None,
+            planner_enabled: true,
+            precision_policy_version:Some(crate::reconstruction::precision::POLICY_VERSION),
+            resolution_policy_version: None,
+            resolution_plan: None,
+            bridge_backfill: BridgeBackfillCheckpoint::default(),
+            brush_training: BrushTrainingCheckpoint::default(),
             features_complete: false,
             matching_complete: false,
             reconstruction_complete: false,
             annotation_complete: false,
             brush_complete: false,
+            reshoot: None,
         }
     }
 }
@@ -317,6 +439,74 @@ mod tests {
         assert_eq!(frames.image_format, None);
         assert_eq!(frames.mask_count, None);
         assert!(!frames.has_alpha);
+        assert_eq!(frames.colmap_input_version, None);
+        assert!(!state.planner_enabled);
+        assert!(state.resolution_policy_version.is_none());
+        assert!(state.resolution_plan.is_none());
+        assert_eq!(
+            state.bridge_backfill.status,
+            crate::planner::BridgeBackfillStatus::NotEvaluated
+        );
+        assert!(state.brush_training.resolved.is_none());
+        assert!(!state.brush_training.oom_retry_used);
+    }
+
+    #[test]
+    fn old_reshoot_state_defaults_colmap_input_version() {
+        let json = r#"{
+          "stage":"extractingFrames","preset":"balanced","video":null,
+          "inputType":"images","frames":null,
+          "featuresComplete":false,"matchingComplete":false,
+          "reconstructionComplete":false,"brushComplete":false,
+          "reshoot":{"sourceSnapshotComplete":true,"supplementalFramesComplete":true,
+            "supplementalFeaturesComplete":false,"incrementalMatchingComplete":false,
+            "incrementalReconstructionComplete":false}
+        }"#;
+
+        let state: PipelineStateFile = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            state.reshoot.unwrap().colmap_input_version,
+            None,
+            "legacy reshoot checkpoints must not silently opt into the new image semantics"
+        );
+    }
+
+    #[test]
+    fn brush_training_checkpoint_round_trips_resolved_retry_state() {
+        let mut state = PipelineStateFile::created(Quality::High);
+        let initial = crate::presets::resolve_brush_training_preset(
+            Quality::High,
+            true,
+            Some(12_288),
+            7_680,
+            350_000,
+        );
+        state.brush_training.initial_resolved = Some(initial);
+        state.brush_training.resolved = initial.downgrade_after_oom(350_000);
+        state.brush_training.oom_retry_used = true;
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: PipelineStateFile = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.brush_training, state.brush_training);
+    }
+
+    #[test]
+    fn staged_resolution_plan_round_trips_without_affecting_old_states() {
+        let mut state = PipelineStateFile::created(Quality::High);
+        state.resolution_policy_version = Some(crate::presets::PLANNER_RESOLUTION_POLICY_VERSION);
+        state.resolution_plan = Some(crate::presets::resolve_planner_resolution_plan(
+            Quality::High,
+            Some(8_192),
+            2_560,
+            3_840,
+            false,
+        ));
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: PipelineStateFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.resolution_policy_version, Some(1));
+        assert_eq!(restored.resolution_plan.unwrap().working_long_edge(), 3_840);
     }
 
     #[test]
@@ -331,11 +521,24 @@ mod tests {
         assert_eq!(metadata.transform, GaussianTransform::default());
         assert_eq!(metadata.editing, GaussianEditing::default());
         assert_eq!(metadata.input_type, ProjectInputType::Video);
+        assert_eq!(metadata.workspace_task_id, None);
         assert_eq!(metadata.schema_version, 2);
     }
 
     #[test]
     fn rejects_invalid_transform_values() {
+        assert!(GaussianTransform {
+            scale: 10_000.0,
+            ..GaussianTransform::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(GaussianTransform {
+            scale: 10_000.1,
+            ..GaussianTransform::default()
+        }
+        .validate()
+        .is_err());
         assert!(GaussianTransform {
             scale: 0.0,
             ..GaussianTransform::default()

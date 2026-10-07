@@ -1,4 +1,4 @@
-name: Windows 11 x64
+name: Windows x64
 
 on:
   push:
@@ -8,36 +8,19 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: windows-alpha-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build-and-package:
-    # `windows-2025` is the current GitHub-hosted Windows image and ships 7-Zip
-    # (used by the payload assertion below). Use `windows-latest` instead if the
-    # pin ever becomes unavailable.
-    runs-on: windows-2025
+  test-and-build:
+    runs-on: windows-2022
     timeout-minutes: 120
-    env:
-      CARGO_TERM_COLOR: always
-
     steps:
       - name: Check out source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
-
-      - name: Read package version
-        id: package
-        shell: pwsh
-        run: |
-          $version = node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version"
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Set up Rust
         shell: pwsh
@@ -46,177 +29,89 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
-      # Every `run` step is pinned to `shell: pwsh` -- PowerShell is the default
-      # on Windows runners, and pinning it removes any dependence on a bash
-      # being present on PATH.
       - name: Install frontend dependencies
-        shell: pwsh
         run: npm ci
 
-      - name: Frontend release checks
+      - name: Frontend, runtime policy, and license checks
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           npm run verify:telemetry:release
           npm test
+          npm run test:engine-scripts
+          npm run verify:colmap-lock
+          npm run build
+          npm run verify:bundle-resources
+          npm run verify:licenses
 
-      - name: Verify license metadata and mappings
-        shell: pwsh
-        run: npm run verify:licenses:windows
-
-      - name: Install and verify bundled engines
-        shell: pwsh
-        run: |
-          npm run setup:engines:windows
-          npm run verify:engines:windows
-
-      # REQUIRED before `tauri build`: tauri-build fails hard when
-      # bundle.externalBin's binaries/splatstudio-<triple>.exe is missing, the
-      # file is gitignored, and tauri.conf.json's beforeBuildCommand
-      # (`npm run build:bundle:windows`) does NOT stage it.
-      - name: Stage CLI for externalBin
-        shell: pwsh
-        run: npm run stage:cli
-
-      - name: Rust formatting, tests, and clippy
+      - name: Install and verify pinned engines
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm run setup:engines
+          npm run verify:engines
+          node scripts/smoke-colmap-image-io.mjs engines/colmap/bin/colmap.exe
+
+      - name: Rust formatting
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust clippy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Windows NSIS installer
         shell: pwsh
-        run: npm run tauri -- build --bundles nsis
+        run: npm run package:windows
 
-      # The installer is only accepted if its PAYLOAD really carries the bundled
-      # engines and the staged CLI. An NSIS installer produced by Tauri is a
-      # self-extracting archive; `7z x` unpacks the enclosed payload, so the
-      # resources can be inspected without installing. Any missing file fails
-      # this step loudly with the listing dumped. No `continue-on-error`.
-      - name: Verify NSIS installer payload
+      - name: Verify packaged COLMAP resources and installer
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if (-not $installer) {
-            throw 'No NSIS installer was produced in src-tauri/target/release/bundle/nsis.'
+          $runtime = 'engines/colmap'
+          foreach ($relative in @(
+            'bin/colmap.exe',
+            'lib/colmap/vocab_tree_faiss_flickr100K_words256K.bin',
+            'BUILD-INFO.json',
+            'BUNDLED-COMPONENTS.json',
+            'SHA256SUMS'
+          )) {
+            $target = Join-Path $runtime $relative
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "Missing packaged input: $target" }
+          }
+          $installer = Get-ChildItem -LiteralPath dist-artifacts -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $installer -or $installer.Length -eq 0) { throw 'Missing NSIS installer.' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'ooosplat-package-inspection'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "NSIS silent install failed with $($process.ExitCode)" }
+          foreach ($relative in @(
+            'engines/colmap/bin/colmap.exe',
+            'engines/colmap/lib/colmap/vocab_tree_faiss_flickr100K_words256K.bin',
+            'engines/colmap/BUILD-INFO.json',
+            'engines/colmap/BUNDLED-COMPONENTS.json'
+          )) {
+            $target = Join-Path $installDir $relative
+            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "Installed NSIS package is missing $relative" }
           }
 
-          $minSize = 400MB
-          $maxSize = 2GB
-          if ($installer.Length -le $minSize) {
-            throw "Installer $($installer.Name) is only $([math]::Round($installer.Length / 1MB, 1)) MB; the bundled engines alone are about 505 MB, so the engines are not packaged."
-          }
-          if ($installer.Length -ge $maxSize) {
-            throw "Installer $($installer.Name) is $([math]::Round($installer.Length / 1MB, 1)) MB, which exceeds the expected ceiling."
-          }
-
-          $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
-          if (-not $sevenZip) {
-            throw '7z was not found on this runner; the installer payload cannot be verified.'
-          }
-
-          $listing = & 7z l $installer.FullName 2>&1 | Out-String
-          Write-Host $listing
-
-          $extractDir = Join-Path $env:RUNNER_TEMP 'nsis-payload'
-          if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
-          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-
-          & 7z x $installer.FullName "-o$extractDir" -y | Out-Host
-          if ($LASTEXITCODE -ne 0) {
-            throw "7z failed to extract the NSIS installer (exit $LASTEXITCODE). The payload cannot be verified."
-          }
-
-          $extractedFiles = @(Get-ChildItem -Path $extractDir -Recurse -File)
-          if ($extractedFiles.Count -eq 0) {
-            throw "7z extracted no files from $($installer.Name); the installer payload is unreadable, so the bundled engines cannot be confirmed."
-          }
-
-          # Nested archives (for example an embedded .7z in $PLUGINSDIR) need a
-          # second pass. Only .7z/.zip are unpacked; .exe members are left alone.
-          $nestedDirs = 0
-          foreach ($archive in @($extractedFiles | Where-Object { $_.Extension -in @('.7z', '.zip') })) {
-            $nestedDirs++
-            $target = Join-Path $extractDir ("nested-{0}" -f $nestedDirs)
-            New-Item -ItemType Directory -Path $target -Force | Out-Null
-            if ($archive.Extension -eq '.7z') {
-              & 7z x $archive.FullName "-o$target" -y | Out-Host
-            } else {
-              Expand-Archive -LiteralPath $archive.FullName -DestinationPath $target -Force
-            }
-          }
-
-          $files = @(Get-ChildItem -Path $extractDir -Recurse -File)
-          $relative = @($files | ForEach-Object { $_.FullName.Substring($extractDir.Length).TrimStart('\', '/') })
-
-          $required = @(
-            'splatstudio.exe',
-            'engines\ffmpeg\ffmpeg.exe',
-            'engines\colmap\bin\colmap.exe',
-            'engines\brush\brush_app.exe',
-            'engines\manifest.json'
-          )
-
-          $missing = @()
-          foreach ($needle in $required) {
-            # Recursive basename lookup, so the exact $INSTDIR layout does not
-            # matter; the two manifest-bearing engine paths are matched by
-            # suffix because they carry a directory component.
-            $leaf = Split-Path -Leaf $needle
-            $hits = @($relative | Where-Object { $_ -eq $needle -or (Split-Path -Leaf $_) -eq $leaf })
-            if ($hits.Count -eq 0) {
-              $missing += $needle
-            } else {
-              Write-Host "Found $needle"
-              $hits | Select-Object -First 5 | ForEach-Object { Write-Host "  -> $_" }
-            }
-          }
-
-          if ($missing.Count -gt 0) {
-            Write-Host '--- 7z listing of the installer ---'
-            Write-Host $listing
-            Write-Host '--- extracted payload ---'
-            $relative | Sort-Object | Select-Object -First 200 | ForEach-Object { Write-Host $_ }
-            throw "NSIS installer payload is missing: $($missing -join ', ')"
-          }
-
-          Write-Host "Verified NSIS payload: $($installer.Name), $([math]::Round($installer.Length / 1MB, 1)) MB, $($files.Count) extracted files."
-
-      # collect-windows-installer.mjs copies the newest NSIS installer to
-      # dist-artifacts/ and writes SHA256SUMS.txt there. The script still emits
-      # the legacy `OOOSplat-...` file name; released artifact names are brand
-      # elements and must read MacauSplat, so the file is renamed and the
-      # checksum file regenerated for the renamed file here. Fixing the name at
-      # the source requires editing scripts/collect-windows-installer.mjs, which
-      # is out of scope for this workflow change.
-      - name: Collect Windows installer
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          node scripts/collect-windows-installer.mjs
-
-          $version = '${{ steps.package.outputs.version }}'
-          $target = "MacauSplat-$version-x64-windows.exe"
-          Get-ChildItem dist-artifacts -Filter '*.exe' | ForEach-Object {
-            if ($_.Name -ne $target) {
-              Move-Item -LiteralPath $_.FullName -Destination (Join-Path $_.DirectoryName $target) -Force
-            }
-          }
-
-          $file = Get-Item (Join-Path 'dist-artifacts' $target)
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-          "$hash  $($file.Name)" | Out-File -FilePath (Join-Path 'dist-artifacts' 'SHA256SUMS.txt') -Encoding ascii
-          Get-Content (Join-Path 'dist-artifacts' 'SHA256SUMS.txt')
-
-      # SHA256SUMS.txt lives inside dist-artifacts/, so this single upload
-      # covers both the installer and its checksums.
       - name: Upload Windows installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
-          name: MacauSplat-${{ steps.package.outputs.version }}-x64-windows
+          name: OOOSplat-${{ github.run_number }}-x64-windows
           path: dist-artifacts/
           if-no-files-found: error
           retention-days: 14

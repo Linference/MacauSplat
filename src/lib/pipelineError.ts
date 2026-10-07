@@ -1,5 +1,5 @@
 export type PipelineErrorCode = "cancelled" | "pipeline_failed";
-export type PipelineFailureKind = "mapper_source" | "mapper_storage" | "brush_gpu" | "brush_dataset";
+export type PipelineFailureKind = "mapper_source" | "mapper_storage" | "brush_gpu" | "brush_device_lost" | "brush_dataset";
 
 export interface PipelineCommandError {
   code: PipelineErrorCode;
@@ -10,9 +10,10 @@ export interface PipelineCommandError {
   projectId?: string;
   projectPath?: string;
   logsDirectory?: string;
+  failureId?: string;
 }
 
-const failureKinds = new Set<PipelineFailureKind>(["mapper_source", "mapper_storage", "brush_gpu", "brush_dataset"]);
+const failureKinds = new Set<PipelineFailureKind>(["mapper_source", "mapper_storage", "brush_gpu", "brush_device_lost", "brush_dataset"]);
 
 export function pipelineCommandError(error: unknown): PipelineCommandError | null {
   if (typeof error !== "object" || error == null) return null;
@@ -35,6 +36,7 @@ export function pipelineCommandError(error: unknown): PipelineCommandError | nul
     projectId: typeof candidate.projectId === "string" ? candidate.projectId : undefined,
     projectPath: typeof candidate.projectPath === "string" ? candidate.projectPath : undefined,
     logsDirectory: typeof candidate.logsDirectory === "string" ? candidate.logsDirectory : undefined,
+    failureId: typeof candidate.failureId === "string" ? candidate.failureId : undefined,
   };
 }
 

@@ -11,7 +11,13 @@
     "resources": {
       "../licenses/FFmpeg-CORRESPONDING-SOURCE.txt": "licenses/FFmpeg-CORRESPONDING-SOURCE.txt",
       "../engines/manifest.macos.json": "engines/manifest.macos.json",
-      "../engines/macos/arm64/": "engines/macos/arm64/"
+      "../engines/macos/arm64/bin/": "engines/macos/arm64/bin/",
+      "../engines/macos/arm64/lib/": "engines/macos/arm64/lib/",
+      "../engines/macos/arm64/licenses/": "engines/macos/arm64/licenses/",
+      "../engines/macos/arm64/SHA256SUMS": "engines/macos/arm64/SHA256SUMS",
+      "../engines/macos/arm64/BUILD-INFO.json": "engines/macos/arm64/BUILD-INFO.json",
+      "../engines/macos/arm64/BUNDLED-COMPONENTS.json": "engines/macos/arm64/BUNDLED-COMPONENTS.json",
+      "../engines/macos/arm64/colmap/": "engines/macos/arm64/colmap/"
     },
     "macOS": {
       "frameworks": [],

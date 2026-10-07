@@ -13,6 +13,25 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+# Validate/install COLMAP first so an unbuilt release cannot partially update
+# the other engines or silently accept the previously downloaded official zip.
+& node (Join-Path $PSScriptRoot 'setup-colmap-runtime.mjs') windows
+if ($LASTEXITCODE -ne 0) { throw 'Locked COLMAP runtime installation failed.' }
+
+function Get-Sha256([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 if (-not $CacheDirectory) {
   $CacheDirectory = Join-Path $workspace '.cache\engines'
 }
@@ -35,7 +54,7 @@ function Test-RequiredFiles($Engine, [string]$Destination) {
   foreach ($item in $required) {
     $path = Join-Path $workspace $item.path
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-    if ((Get-LockedFileSha256 -LiteralPath $path) -ne $item.sha256) { return $false }
+    if ((Get-Sha256 $path) -ne $item.sha256) { return $false }
   }
   return $true
 }
@@ -43,6 +62,7 @@ function Test-RequiredFiles($Engine, [string]$Destination) {
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 foreach ($engine in $manifest.engines) {
+  if ($engine.name -eq 'COLMAP' -or $engine.name -eq 'Brush') { continue }
   $install = $engine.install
   if (-not $install) { throw "Engine '$($engine.name)' has no install configuration." }
 
@@ -54,7 +74,7 @@ foreach ($engine in $manifest.engines) {
   $archivePath = Join-Path $CacheDirectory $install.archiveName
   $download = $true
   if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
-    $download = (Get-LockedFileSha256 -LiteralPath $archivePath) -ne $engine.archiveSha256
+    $download = (Get-Sha256 $archivePath) -ne $engine.archiveSha256
     if ($download) {
       Write-Warning "Cached archive hash changed; downloading a clean copy for $($engine.name)."
       Remove-Item -LiteralPath $archivePath -Force
@@ -68,7 +88,7 @@ foreach ($engine in $manifest.engines) {
     Write-Host "Using cached archive: $($install.archiveName)"
   }
 
-  $archiveHash = (Get-LockedFileSha256 -LiteralPath $archivePath)
+  $archiveHash = Get-Sha256 $archivePath
   if ($archiveHash -ne $engine.archiveSha256) {
     throw "Archive hash mismatch for $($engine.name). Expected $($engine.archiveSha256), got $archiveHash. The upstream asset may have changed; update manifest.json only after reviewing the new release."
   }
@@ -102,5 +122,10 @@ foreach ($engine in $manifest.engines) {
     }
   }
 }
+
+$brushArguments = @('prepare', 'windows', '--cache', $CacheDirectory)
+if ($Force) { $brushArguments += '--force' }
+& node (Join-Path $PSScriptRoot 'brush-runtime.mjs') @brushArguments
+if ($LASTEXITCODE -ne 0) { throw 'Pinned OOOBrush installation failed.' }
 
 & (Join-Path $PSScriptRoot 'verify-engines.ps1')

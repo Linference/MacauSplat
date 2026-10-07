@@ -52,21 +52,21 @@ jobs:
         run: |
           npm run verify:telemetry:release
           npm test
+          npm run test:engine-scripts
+          npm run verify:colmap-lock
           npm run build
+          npm run verify:bundle-resources
           npm run verify:licenses
 
-      # actions/cache@v5 deprecated `save-always`, which also never runs when an
-      # earlier step failed. Restore here and save explicitly at the end of the
-      # job with `if: always()`.
-      - name: Restore macOS build caches
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Restore macOS non-COLMAP engine build caches
+        uses: actions/cache@v5
         with:
           path: |
             ~/Library/Caches/Homebrew
             .cache/ccache
             .cache/macos-engine-build/sources
-          key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}
-          restore-keys: macos-15-arm64-engines-
+          key: macos-15-arm64-engines-${{ hashFiles('engines/manifest.macos.json', 'engines/colmap-runtime.json', 'scripts/setup-macos-build-deps.sh', 'scripts/build-engines-macos.sh') }}
+          save-always: true
 
       # Obtain the pinned arm64 engine runtime instead of rebuilding it.
       # Primary path: setup:engines:macos downloads distribution.sourceUrl
@@ -106,16 +106,42 @@ jobs:
           done
           npm run verify:engines:macos
 
-      # REQUIRED before `tauri build`: tauri-build checks bundle.externalBin and
-      # the staged CLI is gitignored, so a clean checkout has to run this.
-      - name: Stage CLI for externalBin
-        run: npm run stage:cli
-
-      - name: Rust formatting, tests, and clippy
+      - name: Build FFmpeg/Brush and install the pinned COLMAP Release
         run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          npm run build:engines:macos
+          archive_name="$(node -p "require('./engines/manifest.macos.json').distribution.archiveName")"
+          archive="$GITHUB_WORKSPACE/dist-engines/$archive_name"
+          test -f "$archive"
+          {
+            echo "OOOSPLAT_ENGINE_BUILD_VERIFY=1"
+            echo "OOOSPLAT_MACOS_ENGINE_ARCHIVE=$archive"
+          } >> "$GITHUB_ENV"
+
+      - name: Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust tests
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml 2>&1 | tee rust-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            summary="$(awk '/^failures:/{capture=1} capture' rust-test.log | tail -n 80)"
+            if [[ -z "$summary" ]]; then
+              summary="$(tail -n 80 rust-test.log)"
+            fi
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Rust tests failed::$summary"
+          fi
+          exit "$status"
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build unsigned app and DMG
         env:
@@ -131,10 +157,16 @@ jobs:
           plist="$app/Contents/Info.plist"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")"
           test -x "$app/Contents/MacOS/$executable"
-          for engine in ffmpeg ffprobe colmap brush_app; do
+          for engine in ffmpeg ffprobe brush_app; do
             test -x "$app/Contents/Resources/engines/macos/arm64/bin/$engine"
             file "$app/Contents/Resources/engines/macos/arm64/bin/$engine" | grep -q arm64
           done
+          colmap_root="$app/Contents/Resources/engines/macos/arm64/colmap"
+          test -x "$colmap_root/bin/colmap"
+          file "$colmap_root/bin/colmap" | grep -q arm64
+          test -s "$colmap_root/lib/colmap/vocab_tree_faiss_flickr100K_words256K.bin"
+          test -s "$colmap_root/BUILD-INFO.json"
+          test -s "$colmap_root/BUNDLED-COMPONENTS.json"
           hdiutil verify "$dmg"
 
       - name: Package downloadable files

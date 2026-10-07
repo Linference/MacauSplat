@@ -57,7 +57,11 @@ install_from_archive() {
 }
 
 mkdir -p "$cache" "$(dirname "$destination")"
-
+if [[ "${OOOSPLAT_ENGINE_BUILD_VERIFY:-}" != "1" ]]; then
+  [[ "$(read_manifest distribution.archiveSha256)" =~ ^[a-fA-F0-9]{64}$ && "$(read_manifest distribution.integritySha256)" =~ ^[a-fA-F0-9]{64}$ ]] || {
+    echo 'macOS engine archive is not yet hash-locked; build, review and lock the first release.' >&2; exit 1;
+  }
+fi
 if [[ -n "${OOOSPLAT_MACOS_ENGINE_ARCHIVE:-}" ]]; then
   source_archive="$OOOSPLAT_MACOS_ENGINE_ARCHIVE"
   [[ -f "$source_archive" ]] || { echo "Missing local engine archive: $source_archive" >&2; exit 1; }
@@ -72,18 +76,14 @@ if [[ -n "${OOOSPLAT_MACOS_ENGINE_ARCHIVE:-}" ]]; then
   exit 0
 fi
 
-# The pinned release asset is the fast path. It only exists once
-# .github/workflows/macos-engines.yml has published the tag named in
-# distribution.tag, so a failed download must not be fatal: rebuild the runtime
-# from the pinned engine sources instead of leaving the checkout without engines
-# and failing the build. The rebuild is reproducible because every input is
-# pinned by SHA-256 in engines/manifest.macos.json.
-if curl --fail --location --retry 3 "$source_url" --output "$archive" &&
-  curl --fail --location --retry 3 "$checksum_url" --output "$checksum"; then
-  install_from_archive
-  "$workspace/scripts/verify-engines-macos.sh"
-  exit 0
+expected="$(read_manifest distribution.archiveSha256)"
+if [[ "${OOOSPLAT_ENGINE_BUILD_VERIFY:-}" == "1" && -n "${OOOSPLAT_MACOS_ENGINE_ARCHIVE:-}" ]]; then
+  expected="$(awk 'NF { print tolower($1); exit }' "$checksum")"
 fi
+expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+[[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid release checksum file." >&2; exit 1; }
+actual="$(shasum -a 256 "$archive" | awk '{ print tolower($1) }')"
+[[ "$actual" == "$expected" ]] || { echo "macOS engine archive SHA-256 mismatch." >&2; exit 1; }
 
 rm -f -- "$archive" "$checksum"
 
@@ -100,6 +100,37 @@ if [[ -n "${OOOSPLAT_MACOS_ENGINE_NO_BUILD:-}" ]]; then
   exit 1
 fi
 
-echo "Falling back to a local build from the pinned engine sources ($build_fallback)." >&2
-echo "This compiles FFmpeg and COLMAP and can take a long time." >&2
-"$workspace/$build_fallback"
+temporary="$(mktemp -d)"
+trap 'rm -rf -- "$temporary"' EXIT
+tar -xJf "$archive" -C "$temporary"
+runtime_root="$temporary/ooosplat-engines-macos-arm64"
+[[ -d "$runtime_root" ]] || { echo "Unexpected macOS engine archive layout." >&2; exit 1; }
+integrity_pin="$(read_manifest distribution.integritySha256)"
+if [[ "${OOOSPLAT_ENGINE_BUILD_VERIFY:-}" == "1" && -n "${OOOSPLAT_MACOS_ENGINE_ARCHIVE:-}" ]]; then
+  integrity_pin="$(shasum -a 256 "$runtime_root/SHA256SUMS" | awk '{print $1}')"
+fi
+node "$workspace/scripts/colmap-runtime.mjs" "$runtime_root" macos "$integrity_pin" integrity
+
+staged="$temporary/runtime"
+mv "$runtime_root" "$staged"
+# The destination contains a tracked placeholder README so a fresh clone has the
+# resource directory before engines are installed. Preserve it across the
+# all-at-once runtime replacement; otherwise setup leaves the worktree dirty by
+# deleting a tracked file.
+if [[ -f "$destination/README.md" ]]; then
+  cp "$destination/README.md" "$staged/README.md"
+fi
+# The mixed runtime does not own standalone COLMAP. Preserve the previous
+# directory until the independent, atomic COLMAP installer has a verified
+# replacement ready; a download failure must not remove a working local copy.
+if [[ -d "$destination/colmap" ]]; then
+  cp -R "$destination/colmap" "$staged/colmap"
+fi
+rm -rf -- "$destination"
+mv "$staged" "$destination"
+
+# COLMAP is an independently versioned runtime and is never merged into the
+# FFmpeg/Brush directory, avoiding dylib and metadata collisions.
+node "$workspace/scripts/setup-colmap-runtime.mjs" macos
+
+"$workspace/scripts/verify-engines-macos.sh"

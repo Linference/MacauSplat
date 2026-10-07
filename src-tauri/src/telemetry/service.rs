@@ -19,7 +19,7 @@ pub const TELEMETRY_ENDPOINT: Option<&str> = match option_env!("OOOSPLAT_TELEMET
     _ => None,
 };
 const TELEMETRY_TIMEOUT: Duration = Duration::from_secs(4);
-const TELEMETRY_SCHEMA_VERSION: u32 = 2;
+const TELEMETRY_SCHEMA_VERSION: u32 = 3;
 const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -195,6 +195,11 @@ impl TelemetryService {
         Ok(preferences)
     }
 
+    /// Enqueues anonymous telemetry as a strictly best-effort side channel.
+    ///
+    /// Delivery success, rejection, serialization/configuration failures, and network errors are
+    /// intentionally unobservable to callers: telemetry must never change a pipeline result,
+    /// emit a user-facing pipeline event, or block completion while the HTTP request is running.
     pub fn track(&self, event: TelemetryEvent) {
         let service = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -363,6 +368,12 @@ impl TelemetryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        pipeline::effectiveness::PlannerEffectivenessSnapshot,
+        telemetry::event::{
+            TelemetryInputType, TelemetryPlannerOutcome, TelemetryQuality, TelemetryRunKind,
+        },
+    };
 
     #[test]
     fn production_endpoint_is_compiled_from_the_public_project_config() {
@@ -483,7 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivery_failure_is_silent_and_keeps_analytics_enabled() {
+    async fn planner_evaluation_delivery_failure_is_silent_and_keeps_analytics_enabled() {
         let directory = tempfile::tempdir().unwrap();
         let service = TelemetryService {
             config_path: Some(directory.path().join("telemetry.json")),
@@ -495,7 +506,20 @@ mod tests {
         assert!(service.preferences().await.unwrap().analytics_enabled);
         assert!(
             !service
-                .deliver_if_enabled(TelemetryEvent::DailyActive)
+                .deliver_if_enabled(TelemetryEvent::PlannerEvaluation {
+                    planner_schema_version: 1,
+                    run_id: Uuid::new_v4(),
+                    run_kind: TelemetryRunKind::New,
+                    outcome: TelemetryPlannerOutcome::Completed,
+                    planner_enabled: true,
+                    planner_version: Some("quality_v2_planner_v1"),
+                    quality_preset: TelemetryQuality::High,
+                    input_type: TelemetryInputType::Video,
+                    total_duration_ms: 1_000,
+                    failure_stage: None,
+                    error_code: None,
+                    snapshot: Box::new(PlannerEffectivenessSnapshot::default()),
+                })
                 .await
         );
         assert!(service.preferences().await.unwrap().analytics_enabled);

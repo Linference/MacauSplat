@@ -5,14 +5,23 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
     error::{Result, SplatError},
-    pipeline::{estimate::RuntimeSample, PipelineStage},
-    project::{manager::atomic_write_json, ProjectMetadata, ProjectStatus, PROJECT_APP_ID},
+    pipeline::{
+        estimate::{RuntimeInputKind, RuntimeSample},
+        PipelineStage,
+    },
+    project::{
+        manager::atomic_write_json, PipelineStateFile, ProjectMetadata, ProjectStatus,
+        PROJECT_APP_ID,
+    },
     reconstruction::ply::inspect_gaussian_ply,
 };
+
+static PROJECT_INDEX_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub async fn runtime_samples() -> Vec<RuntimeSample> {
     let Ok(index) = load_index().await else {
@@ -33,6 +42,12 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
             continue;
         };
         let state_bytes = tokio::fs::read(item.path.join("state.json")).await.ok();
+        let state = state_bytes
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<PipelineStateFile>(bytes).ok());
+        let brush = state
+            .as_ref()
+            .and_then(|state| state.brush_training.resolved);
         let Some(extracted_frames) = runtime_sample_frame_count(
             state_bytes.as_deref(),
             metadata.output.as_ref().map(|output| output.input_images),
@@ -41,8 +56,35 @@ pub async fn runtime_samples() -> Vec<RuntimeSample> {
         };
         samples.push(RuntimeSample {
             quality: metadata.quality,
+            input_kind: match metadata.input_type {
+                crate::project::ProjectInputType::Video => RuntimeInputKind::Video,
+                crate::project::ProjectInputType::Images => RuntimeInputKind::Images,
+            },
+            source_long_edge: state
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .video
+                        .as_ref()
+                        .map(|video| video.width.max(video.height))
+                        .or_else(|| {
+                            state
+                                .image_sequence
+                                .as_ref()
+                                .map(|images| images.width.max(images.height))
+                        })
+                })
+                .unwrap_or(1),
+            working_long_edge: state
+                .as_ref()
+                .and_then(|state| state.resolution_plan)
+                .map(|plan| plan.working_long_edge()),
+            resolution_policy_version: state
+                .as_ref()
+                .and_then(|state| state.resolution_policy_version),
             extracted_frames,
             duration_ms,
+            brush,
         });
         if samples.len() == 20 {
             break;
@@ -69,8 +111,16 @@ fn runtime_sample_frame_count(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    #[serde(default)]
+    pub mcp: crate::mcp::McpSettings,
     pub schema_version: u32,
     pub projects_root: PathBuf,
+    #[serde(default = "default_planner_enabled")]
+    pub planner_enabled: bool,
+}
+
+const fn default_planner_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +141,8 @@ struct ProjectIndex {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub id: Uuid,
+    pub workspace_task_id: Option<Uuid>,
+    pub task_kind: &'static str,
     pub name: String,
     pub status: ProjectStatus,
     pub project_path: PathBuf,
@@ -111,6 +163,7 @@ pub struct ProjectSummary {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOverview {
     pub projects_root: PathBuf,
+    pub planner_enabled: bool,
     pub projects: Vec<ProjectSummary>,
 }
 
@@ -169,6 +222,8 @@ fn index_path() -> Result<PathBuf> {
 }
 pub fn default_projects_root() -> Result<PathBuf> {
     dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .or_else(|| dirs::data_local_dir().map(|data| data.join("Documents")))
         .map(|v| v.join("SplatStudio").join("Projects"))
         .ok_or_else(|| SplatError::Process("无法定位 Documents 目录".into()))
 }
@@ -183,12 +238,14 @@ pub async fn load_settings() -> Result<AppSettings> {
         }
     }
     Ok(AppSettings {
-        schema_version: 1,
+        mcp: Default::default(),
+        schema_version: 2,
         projects_root: default_projects_root()?,
+        planner_enabled: true,
     })
 }
 
-async fn save_settings(settings: &AppSettings) -> Result<()> {
+pub(crate) async fn save_settings(settings: &AppSettings) -> Result<()> {
     let path = settings_path()?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -205,8 +262,15 @@ pub async fn save_projects_root(root: PathBuf) -> Result<AppSettings> {
     Ok(settings)
 }
 
-async fn load_index() -> Result<ProjectIndex> {
-    let path = index_path()?;
+pub async fn save_planner_enabled(enabled: bool) -> Result<AppSettings> {
+    let mut settings = load_settings().await?;
+    settings.schema_version = settings.schema_version.max(2);
+    settings.planner_enabled = enabled;
+    save_settings(&settings).await?;
+    Ok(settings)
+}
+
+async fn load_index_from(path: &Path) -> Result<ProjectIndex> {
     if path.is_file() {
         if let Ok(bytes) = tokio::fs::read(path).await {
             if let Ok(value) = serde_json::from_slice(&bytes) {
@@ -220,16 +284,21 @@ async fn load_index() -> Result<ProjectIndex> {
     })
 }
 
-async fn save_index(index: &ProjectIndex) -> Result<()> {
-    let path = index_path()?;
+async fn load_index() -> Result<ProjectIndex> {
+    let _guard = PROJECT_INDEX_LOCK.lock().await;
+    load_index_from(&index_path()?).await
+}
+
+async fn save_index_to(path: &Path, index: &ProjectIndex) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    atomic_write_json(&path, index).await
+    atomic_write_json(path, index).await
 }
 
-pub async fn register_project(id: Uuid, path: &Path) -> Result<()> {
-    let mut index = load_index().await?;
+async fn register_project_at(index_path: &Path, id: Uuid, path: &Path) -> Result<()> {
+    let _guard = PROJECT_INDEX_LOCK.lock().await;
+    let mut index = load_index_from(index_path).await?;
     index
         .projects
         .retain(|item| item.id != id && item.path != path);
@@ -237,7 +306,11 @@ pub async fn register_project(id: Uuid, path: &Path) -> Result<()> {
         id,
         path: path.to_path_buf(),
     });
-    save_index(&index).await
+    save_index_to(index_path, &index).await
+}
+
+pub async fn register_project(id: Uuid, path: &Path) -> Result<()> {
+    register_project_at(&index_path()?, id, path).await
 }
 
 pub async fn validate_registered_final_ply(source: &Path) -> Result<PathBuf> {
@@ -264,8 +337,12 @@ pub async fn validate_registered_final_ply(source: &Path) -> Result<PathBuf> {
     Err(SplatError::InvalidPath(source))
 }
 
-pub async fn load_registered_project(id: Uuid) -> Result<(PathBuf, ProjectMetadata)> {
-    let index = load_index().await?;
+async fn load_registered_project_from(
+    index_path: &Path,
+    id: Uuid,
+) -> Result<(PathBuf, ProjectMetadata)> {
+    let _guard = PROJECT_INDEX_LOCK.lock().await;
+    let index = load_index_from(index_path).await?;
     let item = index
         .projects
         .into_iter()
@@ -279,6 +356,25 @@ pub async fn load_registered_project(id: Uuid) -> Result<(PathBuf, ProjectMetada
         ));
     }
     Ok((item.path, metadata))
+}
+
+pub async fn load_registered_project(id: Uuid) -> Result<(PathBuf, ProjectMetadata)> {
+    load_registered_project_from(&index_path()?, id).await
+}
+
+async fn load_registered_project_summary_from(
+    index_path: &Path,
+    id: Uuid,
+) -> Result<(PathBuf, ProjectMetadata, ProjectSummary)> {
+    let (project_root, metadata) = load_registered_project_from(index_path, id).await?;
+    let summary = summarize_project_metadata(&project_root, metadata.clone()).await?;
+    Ok((project_root, metadata, summary))
+}
+
+pub async fn load_registered_project_summary(
+    id: Uuid,
+) -> Result<(PathBuf, ProjectMetadata, ProjectSummary)> {
+    load_registered_project_summary_from(&index_path()?, id).await
 }
 
 pub async fn registered_final_ply_for_project(
@@ -317,17 +413,16 @@ async fn scan_root(root: &Path, destinations: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub async fn get_overview() -> Result<ProjectOverview> {
-    let settings = load_settings().await?;
-    let mut index = load_index().await?;
+async fn rebuild_index_at(index_path: &Path, roots: &[PathBuf]) -> Result<Vec<ProjectSummary>> {
+    let _guard = PROJECT_INDEX_LOCK.lock().await;
+    let mut index = load_index_from(index_path).await?;
     let mut paths = index
         .projects
         .iter()
         .map(|v| v.path.clone())
         .collect::<Vec<_>>();
-    scan_root(&default_projects_root()?, &mut paths).await?;
-    if settings.projects_root != default_projects_root()? {
-        scan_root(&settings.projects_root, &mut paths).await?;
+    for root in roots {
+        scan_root(root, &mut paths).await?;
     }
     let mut seen = HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
@@ -348,16 +443,35 @@ pub async fn get_overview() -> Result<ProjectOverview> {
             .cmp(&a.completed_at.unwrap_or(a.created_at))
     });
     index.projects = valid;
-    save_index(&index).await?;
+    save_index_to(index_path, &index).await?;
+    Ok(summaries)
+}
+
+pub async fn get_overview() -> Result<ProjectOverview> {
+    let settings = load_settings().await?;
+    let default_root = default_projects_root()?;
+    let mut roots = vec![default_root.clone()];
+    if settings.projects_root != default_root {
+        roots.push(settings.projects_root.clone());
+    }
+    let summaries = rebuild_index_at(&index_path()?, &roots).await?;
     Ok(ProjectOverview {
         projects_root: settings.projects_root,
+        planner_enabled: settings.planner_enabled,
         projects: summaries,
     })
 }
 
 async fn summarize_project(project: &Path) -> Result<ProjectSummary> {
     let bytes = tokio::fs::read(project.join("project.json")).await?;
-    let mut metadata: ProjectMetadata = serde_json::from_slice(&bytes)?;
+    let metadata: ProjectMetadata = serde_json::from_slice(&bytes)?;
+    summarize_project_metadata(project, metadata).await
+}
+
+async fn summarize_project_metadata(
+    project: &Path,
+    mut metadata: ProjectMetadata,
+) -> Result<ProjectSummary> {
     let completion = completion_snapshot(project, &metadata).await;
     let final_ply = completion.path;
     let completion_inconsistent = completion.marked_complete && completion.info.is_none();
@@ -382,6 +496,12 @@ async fn summarize_project(project: &Path) -> Result<ProjectSummary> {
     let output = metadata.output.as_ref();
     Ok(ProjectSummary {
         id: metadata.id,
+        workspace_task_id: metadata.workspace_task_id,
+        task_kind: if metadata.reshoot.is_some() {
+            "reshoot"
+        } else {
+            "generation"
+        },
         name: if metadata.name.is_empty() {
             project
                 .file_name()
@@ -418,7 +538,9 @@ async fn summarize_project(project: &Path) -> Result<ProjectSummary> {
 }
 
 pub async fn delete_project(id: Uuid) -> Result<()> {
-    let mut index = load_index().await?;
+    let _guard = PROJECT_INDEX_LOCK.lock().await;
+    let index_path = index_path()?;
+    let mut index = load_index_from(&index_path).await?;
     let item = index
         .projects
         .iter()
@@ -448,7 +570,7 @@ pub async fn delete_project(id: Uuid) -> Result<()> {
         .map_err(|e| SplatError::Process(e.to_string()))?
         .map_err(|e| SplatError::Process(format!("无法移入回收站：{e}")))?;
     index.projects.retain(|item| item.id != id);
-    save_index(&index).await
+    save_index_to(&index_path, &index).await
 }
 
 fn has_project_ownership(metadata: &ProjectMetadata, path: &Path, id: Uuid) -> bool {
@@ -467,6 +589,7 @@ mod tests {
             schema_version: crate::project::metadata::schema_version(),
             app_id: PROJECT_APP_ID.into(),
             id: Uuid::new_v4(),
+            workspace_task_id: None,
             name: "test".into(),
             created_at: Utc::now(),
             started_at: None,
@@ -483,6 +606,7 @@ mod tests {
             model: "final.ply".into(),
             transform: Default::default(),
             editing: Default::default(),
+            reshoot: None,
         }
     }
 
@@ -492,7 +616,9 @@ mod tests {
     #[test]
     fn default_summary_shape_is_serializable() {
         let value = AppSettings {
+            mcp: Default::default(),
             schema_version: 1,
+            planner_enabled: true,
             projects_root: PathBuf::from("C:/项目 Root"),
         };
         assert!(serde_json::to_string(&value)
@@ -507,6 +633,7 @@ mod tests {
     fn legacy_acceleration_setting_is_ignored() {
         let json = r#"{"schemaVersion":1,"projectsRoot":"C:/旧目录","colmapAcceleration":"gpu"}"#;
         let parsed: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.planner_enabled);
         assert_eq!(parsed.projects_root, PathBuf::from("C:/旧目录"));
         assert!(!serde_json::to_string(&parsed)
             .unwrap()
@@ -569,6 +696,109 @@ mod tests {
         assert!(summary.failure_message.unwrap().contains("final.ply"));
     }
 
+    #[tokio::test]
+    async fn concurrent_registration_rebuild_and_detail_read_preserve_the_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let projects_root = directory.path().join("projects");
+        let index_path = directory.path().join("project-index.json");
+        std::fs::create_dir_all(&projects_root).unwrap();
+
+        let mut projects = Vec::new();
+        for number in 0..12 {
+            let project = projects_root.join(format!("project-{number}"));
+            std::fs::create_dir_all(&project).unwrap();
+            let mut metadata = test_metadata(&project, ProjectStatus::Failed);
+            metadata.id = Uuid::new_v4();
+            metadata.name = format!("project-{number}");
+            metadata.project_path = project.clone();
+            std::fs::write(
+                project.join("project.json"),
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            projects.push((metadata.id, project));
+        }
+
+        register_project_at(&index_path, projects[0].0, &projects[0].1)
+            .await
+            .unwrap();
+        let detail_index = index_path.clone();
+        let detail_id = projects[0].0;
+        let detail = tokio::spawn(async move {
+            load_registered_project_summary_from(&detail_index, detail_id).await
+        });
+        let rebuild_index = index_path.clone();
+        let rebuild_root = projects_root.clone();
+        let rebuild =
+            tokio::spawn(async move { rebuild_index_at(&rebuild_index, &[rebuild_root]).await });
+        let registrations = projects
+            .iter()
+            .skip(1)
+            .cloned()
+            .map(|(id, project)| {
+                let index_path = index_path.clone();
+                tokio::spawn(async move { register_project_at(&index_path, id, &project).await })
+            })
+            .collect::<Vec<_>>();
+
+        let (_, _, summary) = detail.await.unwrap().unwrap();
+        assert_eq!(summary.id, detail_id);
+        rebuild.await.unwrap().unwrap();
+        for registration in registrations {
+            registration.await.unwrap().unwrap();
+        }
+
+        let index = load_index_from(&index_path).await.unwrap();
+        assert_eq!(index.projects.len(), projects.len());
+        assert!(projects
+            .iter()
+            .all(|(id, _)| index.projects.iter().any(|project| project.id == *id)));
+        let leftovers = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "leftover index files: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn registered_project_summary_does_not_rebuild_the_global_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let index_path = directory.path().join("project-index.json");
+        let project = directory.path().join("target-project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut metadata = test_metadata(&project, ProjectStatus::Failed);
+        metadata.project_path = project.clone();
+        std::fs::write(
+            project.join("project.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        register_project_at(&index_path, metadata.id, &project)
+            .await
+            .unwrap();
+        let missing_id = Uuid::new_v4();
+        register_project_at(
+            &index_path,
+            missing_id,
+            &directory.path().join("missing-project"),
+        )
+        .await
+        .unwrap();
+
+        let (_, _, summary) = load_registered_project_summary_from(&index_path, metadata.id)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.id, metadata.id);
+        let index = load_index_from(&index_path).await.unwrap();
+        assert_eq!(index.projects.len(), 2);
+        assert!(index
+            .projects
+            .iter()
+            .any(|project| project.id == missing_id));
+    }
+
     #[test]
     fn deletion_ownership_rejects_unmarked_directories() {
         let id = Uuid::new_v4();
@@ -576,6 +806,7 @@ mod tests {
             schema_version: 2,
             app_id: "another.application".into(),
             id,
+            workspace_task_id: None,
             name: "foreign".into(),
             created_at: Utc::now(),
             started_at: None,
@@ -592,6 +823,7 @@ mod tests {
             model: "final.ply".into(),
             transform: Default::default(),
             editing: Default::default(),
+            reshoot: None,
         };
         assert!(!has_project_ownership(
             &metadata,

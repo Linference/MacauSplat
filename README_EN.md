@@ -16,18 +16,25 @@
 > Upstream project: <https://github.com/ooolabdev/ooosplat> (Apache-2.0, author ooolabdev)
 
 <p align="center">
-  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.4.1"><strong>Upstream OOOSplat 0.4.1 release (not this project)</strong></a>
+  <a href="https://trendshift.io/repositories/177239?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-177239" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/177239/daily?language=Rust" alt="OOOSplat — Trendshift Rust Repository of the Day" width="250" height="55" /></a>
+  <a href="https://trendshift.io/repositories/177239?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-177239" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/177239/weekly?language=Rust" alt="OOOSplat — Trendshift Rust Repository of the Week" width="250" height="55" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ooolabdev/ooosplat/releases/tag/0.5.0"><strong>⬇️ Download the latest release, OOOSplat 0.5.0, for Windows, macOS, or Ubuntu</strong></a>
 </p>
 
 OOOSplat is a local desktop application that turns an ordinary orbit video or image sequence into a 3D Gaussian Splatting project in one workflow. Choose source media, a project directory, and a quality preset, and OOOSplat automatically handles image preparation, camera reconstruction, training, PLY publishing, preview, adjustment, and export.
 
-Windows and the Apple Silicon macOS Alpha provide FFmpeg, FFprobe, COLMAP, and Brush with the application. Linux support remains limited to an Ubuntu 24.04 LTS x86_64 Alpha. Every generation stage runs on the user's own CPU and GPU; input media, project data, models, and logs do not need to be uploaded to a cloud reconstruction or training service. The React interface calls the local Rust backend directly, with no remote service or localhost API required.
+Windows and the Apple Silicon macOS Alpha provide FFmpeg, FFprobe, COLMAP, and Brush with the application. Linux support remains limited to an Ubuntu 24.04 LTS x86_64 Alpha. Every generation stage runs on the user's own CPU and GPU; input media, project data, models, and logs do not need to be uploaded to a cloud reconstruction or training service. The React interface calls the local Rust backend directly. Normal GUI workflows do not depend on a remote service or localhost API; a loopback HTTP endpoint starts only when the optional MCP service is enabled.
 
-Current version: **0.4.1**
+Main development version: **0.6.0**. Latest published release: **0.5.0**.
+
+The main branch includes optional local MCP v1. It is disabled by default, listens only on `127.0.0.1`, and does not require a token. Enabling it automatically authorizes the projects root's `Inputs` directory, with additional input directories available by explicit authorization. A local AI Agent can use seven tools to create, start, list, inspect, read logs from, and cancel tasks that remain visible in the same application. See [MCP v1 setup, tools, and lifecycle](docs/mcp-v1.md).
 
 See the [OOOSplat Roadmap](ROADMAP_EN.md) for planned work.
 
-> Version 0.4.1 supports image-sequence input, automatic masks for transparent MOV/PNG media, stage-level pipeline resume, and rectangle, sphere, and box Gaussian editing while preserving the original `final.ply`.
+> The 0.6.0 main development version adds local MCP v1, the shared task service, cross-platform COLMAP 4.2.1 runtimes, unpremultiplied transparent input with binary masks, and further Auto Optimize, training densification, and preview stability improvements.
 
 ## Why OOOSplat
 
@@ -53,23 +60,29 @@ https://github.com/user-attachments/assets/5b9e8cef-4c71-4bfa-ba23-641fcdd37659
 ## Key Features
 
 - Create Gaussian Splatting projects from MP4/MOV videos or folders containing JPG, JPEG, and PNG images.
-- Videos use uniform frame extraction and sequential matching. Image sequences keep every image and use a shared camera, exhaustive matching, and the existing incremental Mapper.
-- Detect Alpha channels in transparent MOV files, extract RGBA PNG frames and matching COLMAP masks in one pass, and preserve transparency for Brush training.
-- Detect transparent PNG images automatically, preserve Alpha for Brush, and generate COLMAP masks for transparent regions.
-- Bundle CUDA-enabled COLMAP on Windows and arm64 CPU-only COLMAP on macOS; Ubuntu uses its system CPU COLMAP. FFmpeg and Brush follow pinned, verified platform policies.
+- “Auto Optimize (Experimental)” is enabled by default. Video starts at a 6 / 8 / 12 FPS target and uses preset-specific resolution policies for frame preparation, COLMAP, and Brush. If initial reconstruction coverage is low, OOOSplat can add bridge frames within the remaining budget. Disabling it restores the legacy fixed-ratio extraction and resolution strategy.
+- Image sequences keep every image and use a shared camera, exhaustive matching, and the existing incremental Mapper. Videos use sequential matching; bridge-frame recovery does not apply to image sequences.
+- Detect Alpha channels in transparent MOV files, extract unpremultiplied RGBA PNG frames, and create strict 0/255 COLMAP masks at `alpha >= 128` in one pass. Masked pixels are excluded from feature extraction while the original color and Alpha remain available to Brush.
+- Detect transparent PNG images automatically, preserve the original file, bit depth, RGB, and Alpha, and generate binary COLMAP masks at the equivalent 0.5 Alpha threshold.
+- Add high-resolution reshoots to completed projects. Capture video or images with the same device, lens, and resolution; OOOSplat reuses the original database, shared camera, and sparse model, processes only the new features, matches, and registrations, then retrains Brush from every registered image. Transparent MOV/PNG reshoots preserve RGBA and receive automatic masks. Each reshoot creates a separate derived project and never overwrites its source.
+- Bundle COLMAP 4.2.1 from the same commit on all platforms: self-built CUDA/Caspar/Ceres on Windows/Linux, Ceres CPU on Apple Silicon. Brush uses pinned OOOBrush ooo-v1.0.0 headless CLI; FFmpeg policy is unchanged.
 - Automatically check the bundled CUDA runtime, NVIDIA driver version, and GPU Compute Capability. COLMAP uses GPU acceleration for feature extraction and matching when the requirements are met, and otherwise falls back to CPU.
+- Detailed quality selects the Brush training resolution and Splat limit from detected VRAM. If an explicit out-of-memory failure occurs, OOOSplat safely retries once with a lower training profile. On Windows systems with one NVIDIA discrete GPU, Brush also prefers that adapter and provides clearer guidance for device-loss failures.
 - Show processing stages, engine output, key counters, elapsed time, and up to 500 UI log entries in real time.
 - Write complete raw process output to the project `logs` directory.
 - Cancel tasks and terminate the full child-process tree with a Windows Job Object or Unix process group.
 - Choose a custom projects root, defaulting to `Documents\SplatStudio\Projects`.
 - Track completed, failed, interrupted, and cancelled tasks.
+- Share tasks, the execution lock, progress, logs, and results between the GUI and optional local MCP v1. Local Agents can call `get_app_status`, `create_generation_task`, `start_task`, `list_tasks`, `get_task_status`, `read_task_logs`, and `cancel_task`.
 - Resume interrupted pipelines at stage boundaries. OOOSplat validates frame, mask, COLMAP database, sparse reconstruction, and PLY checkpoints, reuses trusted stages, and safely reruns from the earliest invalid stage.
 - Estimate generation time from source size, quality preset, and recent successful local projects, while continuously updating Brush training progress.
 - Preview completed `.ply` projects under “03 Preview” with Orbit, Pan, and Zoom. Switching between Adjust and Animation does not reload the model or reset the camera.
 - Use Adjust mode to edit whole-model position, rotation, and uniform scale, with undo and redo.
+- The preview ground grid uses persistent rendering resources to reduce repeated work during long sessions, and the model Transform scale range is expanded to `0.001–10000`.
 - Use rectangle, sphere, and box Gaussian selection tools. Rectangle selection projects centers through the scene for non-destructive deletion, while sphere and box crops keep points inside the live selection volume.
 - Crop and deletion state is saved automatically. “Save” writes the current result to the single `edit.ply`; later saves safely replace it, while the original `final.ply` is never overwritten.
-- Play a 5-second reveal, an 8-second shockwave, and a continuous camera orbit, then export a watermarked 1080×1920, 30 fps, 23-second H.264 MP4.
+- Play a 5-second reveal, an 8-second shockwave, and a continuous camera orbit. Choose portrait (1080×1920) or landscape (1920×1080) composition and export a watermarked 30 fps, 23-second H.264 MP4.
+- The Export menu also creates a full-quality, single-file offline HTML viewer with the runtime and model embedded. Double-click to rotate, pan, zoom, and manually play the animation without internet access. Current transforms, crops, deletions, and all retained Gaussian / SH data are preserved; `final.ply` and `edit.ply` are not modified. File size is roughly 4/3 of the corresponding PLY, plus the viewer. Very large models remain subject to browser and device capacity.
 - Reveal `final.ply` in the platform file manager or move the complete project to the system trash.
 - Resize the left and right panels by dragging the divider, and scale the full interface from 80% to 140%.
 - Support Chinese characters, spaces, long file names, and UNC project paths.
@@ -87,11 +100,11 @@ https://github.com/user-attachments/assets/5b9e8cef-4c71-4bfa-ba23-641fcdd37659
 ```text
 Input video or image sequence
   │
-  ├─ Video: inspect with FFprobe and extract frames uniformly with FFmpeg; emit RGBA frames and masks for transparent media
+  ├─ Video: inspect with FFprobe and extract at the preset target FPS and working resolution; emit RGBA frames and masks for transparent media
   ├─ Images: sort by filename, keep all images, and generate masks for transparent PNGs
   ├─ COLMAP: auto-select CPU/CUDA for features; sequential matching for video, exhaustive for images
-  ├─ COLMAP: incremental reconstruction and registration validation
-  ├─ Brush: train Gaussian Splats with an available GPU backend
+  ├─ COLMAP: incremental reconstruction and registration validation; Auto Optimize can attempt bridge-frame recovery
+  ├─ Brush: train Gaussian Splats with an available GPU backend; Detailed adapts its profile to VRAM
   └─ Validate the PLY and atomically publish final.ply
 ```
 
@@ -103,7 +116,7 @@ As long as COLMAP produces at least one registered image and valid 3D points, th
 - WebView2 Runtime support.
 - Video export requires WebCodecs AVC support in WebView2. Animation mode remains available when encoding is unavailable, and the UI reports why export is disabled.
 - An available GPU graphics backend for Brush training; a discrete GPU is recommended.
-- COLMAP CUDA acceleration requires an NVIDIA GPU, Windows driver 528.33 or newer, and Compute Capability 5.0 or higher. OOOSplat automatically uses CPU when these requirements are not met; no manual configuration is required.
+- COLMAP CUDA acceleration requires an NVIDIA GPU, Windows driver 580.00 or newer, and Compute Capability 7.5 or higher. OOOSplat automatically uses CPU when these requirements are not met; no manual configuration is required.
 - Enough disk space for source-media copies, input images, COLMAP data, Brush intermediate files, and the final PLY. Long videos, large image sequences, and higher quality presets can require substantial space.
 - The installer uses a per-machine installation and may require administrator privileges.
 
@@ -113,7 +126,7 @@ The COLMAP build bundled on Windows supports both CPU and CUDA GPU execution. OO
 
 > The current deliverable is an unsigned, unnotarized `.app`/`.dmg` Alpha for M1 or newer Apple Silicon Macs. Intel Macs and Universal Binaries are not supported.
 
-- Bundles native arm64 FFmpeg 8.1.2, a real standalone FFprobe, COLMAP 4.0.4 CPU CLI-only, and Brush v0.3.0.
+- Bundles native arm64 FFmpeg 8.1.2, a real standalone FFprobe, COLMAP 4.2.1 Ceres CPU CLI-only, and OOOBrush ooo-v1.0.0 CLI.
 - Users do not install Homebrew, and OOOSplat never falls back to a Homebrew or system `PATH` engine.
 - COLMAP always uses CPU in this Alpha. Brush independently selects an available Metal graphics backend, and the UI explains this distinction.
 - Gatekeeper may block the unsigned Alpha on first launch. In Finder, right-click the app and choose Open. Signing and notarization are planned for a later production release.
@@ -125,40 +138,43 @@ The COLMAP build bundled on Windows supports both CPU and CUDA GPU execution. OO
 - Ubuntu 24.04 LTS, x86_64.
 - A graphics backend and driver supported by Brush. Brush officially supports AMD, Intel, and NVIDIA GPUs. Current end-to-end validation used NVIDIA; CPU-only software graphics backends remain unverified but are not artificially blocked by startup checks.
 - Source builds require Node.js 22.12+, Rust stable, and Tauri 2's WebKitGTK development dependencies; `.deb` users do not need these development tools.
-- Ubuntu 24.04 system `ffmpeg`, `ffprobe`, and CPU-only `colmap` (COLMAP 3.9 from the Ubuntu repository).
-- Brush v0.3.0 for Linux x86_64, installed and verified by `npm run setup:engines`.
+- Ubuntu system `ffmpeg`/`ffprobe`; self-built, hash-locked COLMAP 4.2.1 is bundled, never selected from apt or PATH.
+- OOOBrush ooo-v1.0.0 Linux x86_64 CLI, installed and verified by `npm run setup:engines`.
 
 Install Ubuntu dependencies with:
 
 ```bash
 sudo apt update
 sudo apt install -y \
-  build-essential curl file ffmpeg colmap \
+  build-essential curl file ffmpeg \
   libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
 ```
 
-Install a working Vulkan driver for the graphics adapter, such as the proprietary NVIDIA driver or Mesa for AMD/Intel. Ubuntu 24.04's non-CUDA COLMAP package automatically uses the CPU, while Brush selects an available graphics backend at runtime. Fully CPU-only software Vulkan has not yet been validated end to end.
+Install a working Vulkan driver for the graphics adapter, such as the proprietary NVIDIA driver or Mesa for AMD/Intel. Bundled COLMAP uses CUDA/Caspar on compatible NVIDIA devices and CPU/Ceres otherwise; Brush selects its graphics backend independently. Fully CPU-only software Vulkan has not yet been validated end to end.
 
-After downloading the `MacauSplat-0.4.1-x64-linux` Artifact from GitHub Actions (the same directory contains `SHA256SUMS.txt` so the installer hash can be checked first), install it with:
+After downloading the `OOOSplat-0.6.0-x64-linux` Artifact from the main-branch GitHub Actions run, install it with:
 
 ```bash
-sudo apt install ./MacauSplat-0.4.1-x64-linux.deb
+sudo apt install ./OOOSplat-0.6.0-x64-linux.deb
 ```
 
-The `.deb` installs FFmpeg, FFprobe, and CPU COLMAP through Ubuntu's package manager; the pinned Brush runtime is included in the package.
+The `.deb` installs only FFmpeg/FFprobe through Ubuntu's package manager; pinned COLMAP and Brush runtimes are included.
 
 ## Installation and Use
 
-1. On Windows, run `MacauSplat-0.4.1-x64-windows.exe`. On an Apple Silicon Mac, open `MacauSplat-0.4.1-arm64-macos.dmg` and drag MacauSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./MacauSplat-0.4.1-x64-linux.deb`. Each platform's artifact directory also ships a `SHA256SUMS.txt` for verifying the installer.
-2. Start MacauSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
+Sample media: [Download from Quark Drive](https://pan.quark.cn/s/1dde892a1324) to test or try the generation workflow.
+
+1. On Windows, run `OOOSplat-0.5.0-x64-windows.exe`. On an Apple Silicon Mac, open `OOOSplat-0.5.0-arm64-macos.dmg` and drag OOOSplat into Applications. On Ubuntu 24.04, run `sudo apt install ./OOOSplat-0.5.0-x64-linux.deb`.
+2. Start OOOSplat and confirm that the bundled engine status in the top bar is healthy. Use the `EN / 中文` action in the upper-right corner to switch the interface language instantly.
 3. Under “01 Create New Task,” choose Video or Images from the input-type menu, then click the input field to select a video file or image-sequence folder.
 4. Choose the projects root; OOOSplat remembers the last location.
 5. Select the Fast, Balanced, or Detailed quality preset.
 6. Review the automatically detected COLMAP acceleration status and its explanation, then select “Start Generation.”
 7. Follow live stages, metrics, and logs on the left. When processing finishes, select “Preview” under “02 Task History.”
 8. Edit the model in the “Adjust” mode under “03 Preview.” Changes are saved automatically; “Save” creates or updates `edit.ply`.
-9. Switch to “Animation” for the portrait composition and staged playback. “Export Video” writes a 23-second portrait MP4 into the project directory.
+9. Switch to “Animation,” choose Portrait or Landscape in the center of the command bar, and use “Export → Export video” for a 23-second MP4. Both Adjust and Animation offer “Export → Export offline HTML” to share the current edits. Exports can be cancelled, and the output folder can be opened on completion.
+10. To add detail, choose “High-res reshoot” on a completed project under “02 Task History.” Use the same device, lens, orientation, resolution, and zoom as the source project, and keep enough overlap with the original capture.
 
 Usage notes:
 
@@ -169,13 +185,17 @@ Usage notes:
 
 ## Quality Presets
 
-| Preset | Frames retained | FFmpeg extraction rate | Brush iterations | Maximum training resolution |
-| --- | ---: | ---: | ---: | ---: |
-| Fast | 30% | Source FPS × 0.30 | 8,000 | 1,200 |
-| Balanced | 50% | Source FPS × 0.50 | 15,000 | 1,600 |
-| Detailed | 100% | Source FPS × 1.00 | 30,000 | 2,000 |
+“Auto Optimize (Experimental)” is enabled by default. Video is scaled once during extraction to the selected working resolution while preserving aspect ratio and never upscaling lower-resolution media. Actual sampling never exceeds the source FPS or total frame count. Image sequences keep every valid image at its original input resolution, while COLMAP and Brush still apply the selected preset's processing limits.
 
-FFmpeg performs frame reduction; COLMAP does not reduce the number of frames. OOOSplat does not set a maximum extracted-frame count or an additional Splat-count limit. The final number of Splats depends on the source material, reconstruction, and Brush training.
+| Preset | Initial / bridge-frame ceiling | Video working long edge | COLMAP long edge / maximum features | Brush training |
+| --- | ---: | ---: | ---: | --- |
+| Fast | 6 / 9 FPS | Up to 1,600 | 1,200 / 4,096 | 8,000 iterations, maximum resolution 1,600 |
+| Balanced | 8 / 12 FPS | Up to 1,920 | 1,600 / 8,192 | 15,000 iterations, maximum resolution 1,920 |
+| Detailed | 12 / 15 FPS | Up to 3,200, 3,840, or native resolution according to VRAM | 3,200 / 16,384 | 30,000 iterations, with maximum resolution and Splat limit selected from VRAM |
+
+Detailed starts from one of three VRAM profiles. Below 8 GB, or when VRAM cannot be read, the video and Brush long edges are capped at 3,200. From 8 GB inclusive to below 12 GB, they are capped at 3,840. At 12 GB or more, video stays at its native long edge and Brush uses that native long edge. All three Detailed profiles cap the COLMAP image long edge at 3,200. Bridge-frame recovery is attempted only when the initial video reconstruction has insufficient coverage and unused candidate frames remain. A failed attempt safely returns to the initial reconstruction, and the mechanism does not apply to image sequences. Detailed performs at most one automatic retry with a lower training profile after an explicit out-of-memory failure.
+
+With Auto Optimize disabled, Fast, Balanced, and Detailed return to the legacy 30%, 50%, and 100% source-frame retention strategy. Video uses the legacy maximum long edge of 1,920, Brush resolutions return to 1,200, 1,600, and 2,000, and no additional Splat-count limit is applied.
 
 ## Project and File Locations
 
@@ -188,6 +208,8 @@ Each generation creates a separate directory under the projects root:
   edit.ply              Current edited result; safely replaced on later saves (optional)
   preview.mp4           First optional animation-preview video export
   preview-2.mp4         Later video exports are automatically numbered
+  preview-landscape.mp4 Landscape video (later exports are automatically numbered)
+  preview.html          Offline viewer (later exports use preview-2.html, etc.)
   state.json            Pipeline state
   source\
     input.<ext>         Source-video copy (video projects)
@@ -212,29 +234,36 @@ Application settings and the project index are stored in:
 
 ## Anonymous Usage Statistics
 
-OOOSplat collects anonymous usage statistics by default to track stability and per-stage timings. Turn it off at any time under **Settings -> Privacy** in the top right; nothing is sent once it is off.
+OOOSplat collects anonymous usage statistics by default to track stability and per-stage timings. Turn it off at any time under **Settings -> Privacy** in the top right; no anonymous analytics requests are sent once it is off.
 
 What is sent:
 
 | Field | Description |
 | --- | --- |
 | Install ID | A random UUID generated on first launch. No hardware serial, MAC address, or device fingerprint is read |
-| App version, OS, CPU architecture | For example `0.4.1` / `windows` / `x86_64` |
-| Event name | `daily_active`, `generation_started`, `generation_completed`, `generation_failed`, `pipeline_stage_completed`. `daily_active` is sent at most once a day, and once more on the day the app version changes |
+| App version, OS, CPU architecture | For example `0.6.0` / `windows` / `x86_64` |
+| Event name | `daily_active`, `generation_started`, `generation_completed`, `generation_failed`, `pipeline_stage_completed`, `planner_evaluation`. `daily_active` is sent at most once a day, and once more on the day the app version changes |
 | Quality preset and input type | Enumerated values such as `balanced` / `video`; an image-sequence input reports `images` |
 | Stage and total durations | Milliseconds |
 | Frame count and video duration | Bucketed values, not raw counts |
+| Auto Optimize effectiveness metrics | Anonymous media dimensions and counts, plan, registration result, bridge recovery, Brush configuration, Splat count, and stage timings used to compare planner effectiveness |
 | Failing stage and error code | Enumerated values such as `colmap_mapper_failed`; no raw error text |
 
-What is never sent: any source media, including videos, images, and PLY files; file names, paths, and project names; logs and command output; user names or any personal information.
+Anonymous analytics never sends: source media, including videos, images, and PLY files; file names, paths, and project names; logs and command output; user names or any personal information.
+
+### Voluntary error reports
+
+After generation fails, choose **Send error report**, review the complete redacted report, then choose **Agree and send**. Reports include the failure reason, error details, the latest failure-time log excerpt (up to 200 lines / 64 KiB), app version, system version, and all detectable graphics cards. They exclude media, models, device serials, and anonymous installation identifiers. Paths, filenames, and usernames are removed. Unavailable hardware fields are left empty; the actual GPU is never guessed.
+
+Consent is separate and one-time: you can send a report even with anonymous analytics disabled, without enabling it. Cancelling the preview uploads nothing; failures can only be retried manually, and successful delivery shows a report ID. Local reports and previews remain valid for the current app session without a review time limit, and are cleared when the app closes. Reports received by the server are retained for 30 days. If the receiving service has not been deployed or the network is unavailable, the app reports delivery failure rather than claiming success. See the [receiving service integration guide](server/diagnostics/README.md).
 
 ## Bundled Engines
 
 | Engine | Pinned version/build | Purpose |
 | --- | --- | --- |
 | FFmpeg / FFprobe | Windows x64 8.1 LGPL shared; macOS arm64 8.1.2 LGPL shared | Video analysis and frame extraction |
-| COLMAP | Windows 4.0.4 CUDA; macOS arm64 4.0.4 CPU CLI-only | Feature extraction, matching, and camera reconstruction |
-| Brush | v0.3.0 for Windows x64 / macOS arm64 | Gaussian Splatting training and PLY export |
+| COLMAP | 4.2.1 same commit; Windows/Linux CUDA + Caspar/Ceres; macOS Ceres CPU | Feature extraction, matching, and camera reconstruction |
+| Brush | OOOBrush ooo-v1.0.0; Windows/Linux x64, macOS arm64 | Headless Gaussian Splatting training and PLY export |
 
 Windows, Ubuntu, and macOS source and integrity policies are recorded in [`engines/manifest.json`](engines/manifest.json), [`engines/manifest.linux.json`](engines/manifest.linux.json), and [`engines/manifest.macos.json`](engines/manifest.macos.json). Large engine files are not committed to Git; developers restore them with `npm run setup:engines`. Release builds verify sources, hashes, architecture, the dynamic-library closure, and Brush CLI compatibility.
 
@@ -245,6 +274,25 @@ Third-party licenses and notices are in [`licenses/`](licenses/):
 - Brush: Apache-2.0.
 
 ## Local Development
+
+### Download COLMAP Development Packages
+
+Manually run **COLMAP-only development runtime** in Actions, selecting `all` or
+one platform. Download the successful job's Artifact, extract its outer ZIP and
+inner runtime archive, and copy the top-level directory's **contents** into:
+
+- Windows: `engines/colmap/` (`bin/colmap.exe`).
+- Linux: `engines/linux/colmap/` (`bin/colmap`).
+- macOS: `engines/macos/arm64/colmap/` (`bin/colmap`).
+
+Keep libraries, licenses and metadata together; do not add another wrapper
+directory. Keep your existing FFmpeg, then use `npm run dev:local` or
+`npm run build:local`. These commands automatically prepare and cache pinned
+OOOBrush, but do not install, download or verify COLMAP, or modify formal manifests. Application runtime health
+checks and strict normal release verification remain unchanged.
+
+Artifacts expire after 30 days. The manual workflow must exist on the default
+branch before it can be dispatched. See the [engine development package guide](engines/README.md#download-colmap-only-development-builds).
 
 ### Development Environment
 
@@ -275,7 +323,7 @@ npm run tauri -- dev
 
 From the repository root, `./scripts/start-app-linux.sh` (or `npm run start:app:linux`) verifies the local engines and license mappings, rebuilds the release executable only when the sources changed, and starts OOOSplat.
 
-Ubuntu 24.04 Alpha engine setup installs only verified Brush under `engines/linux/brush/`; FFmpeg, FFprobe, and CPU COLMAP remain system packages. Tauri embeds Brush in the x86_64 `.deb` and declares FFmpeg and COLMAP as Debian dependencies.
+Ubuntu setup restores verified COLMAP under `engines/linux/colmap/` and Brush under `engines/linux/brush/`. FFmpeg/FFprobe remain system packages. The `.deb` embeds COLMAP/Brush and does not depend on system COLMAP.
 
 The Ubuntu 24.04 Alpha CI workflow is in `.github/workflows/ubuntu.yml`. Standard GitHub runners cover frontend tests/build, license mappings, Rust tests, Clippy, FFmpeg integration, `.deb` creation, package validation, and upload of the installer plus SHA-256. Brush end-to-end coverage requires a host or self-hosted runner with a working graphics backend. The complete pipeline is currently validated on NVIDIA; AMD, Intel, and software Vulkan test results are welcome.
 
@@ -331,7 +379,7 @@ that file is a gitignored build product, so a clean checkout fails during the ca
 The NSIS installer is written to:
 
 ```text
-dist-artifacts\MacauSplat-0.4.1-x64-windows.exe
+dist-artifacts\OOOSplat-0.6.0-x64-windows.exe
 ```
 
 `npm run package:linux` (`--bundles deb`) and `npm run package:macos` (`--bundles app,dmg`) follow the same
@@ -393,13 +441,37 @@ cargo run --manifest-path src-tauri\Cargo.toml --bin splatstudio -- generate "D:
 
 For development or diagnostics, use the global `--engine-dir <path>` argument or the `OOOSPLAT_ENGINE_DIR` environment variable to override the default engine directory.
 
-On Linux, `OOOSPLAT_FFMPEG`, `OOOSPLAT_FFPROBE`, `OOOSPLAT_COLMAP`, and `OOOSPLAT_BRUSH` can override individual executables. Otherwise, OOOSplat searches managed repository locations and the system `PATH`.
+Linux FFmpeg/FFprobe retain their individual environment/PATH discovery. Brush defaults to managed `linux/brush/brush_app`, with no PATH fallback; explicit `OOOSPLAT_BRUSH` diagnostic overrides must support the new CLI. COLMAP is resolved only as `linux/colmap/bin/colmap` below the managed root, with no individual `OOOSPLAT_COLMAP` or PATH fallback.
 
 ## FAQ
 
 ### Why is COLMAP using the CPU instead of the GPU?
 
-OOOSplat enables COLMAP GPU acceleration only when the bundled CUDA runtime is healthy and it can confirm an NVIDIA driver version of at least 528.33 and Compute Capability 5.0 or higher. If detection fails or a requirement is not met, COLMAP automatically falls back to CPU and the application shows the specific reason. Brush is independent of COLMAP and selects an available graphics backend at runtime.
+OOOSplat enables COLMAP GPU acceleration only when the bundled CUDA runtime is healthy and it can confirm an NVIDIA driver version of at least 580.00 and Compute Capability 7.5 or higher. Caspar additionally requires a successful tiny BA execution probe. A failed Caspar probe selects Ceres CPU without disabling otherwise available SIFT GPU acceleration. Detection failures select CPU and report the reason. Brush is independent of COLMAP and selects an available graphics backend at runtime.
+
+### How does OOOSplat handle different GPU combinations?
+
+COLMAP and Brush are separate stages. COLMAP requires a compatible NVIDIA CUDA environment for GPU acceleration. Brush uses Vulkan on Windows and Linux and Metal on Apple Silicon macOS. Common configurations are handled as follows; rows without an explicit platform refer to Windows:
+
+| Platform and GPU configuration | COLMAP | Brush training | Detailed Auto Optimize VRAM profile |
+|---|---|---|---|
+| Windows: one NVIDIA discrete GPU | Uses CUDA when the driver and Compute Capability requirements are met | Explicitly selects the first discrete GPU and runs through Vulkan | Uses that NVIDIA GPU's total VRAM to select Low, Standard, or Large |
+| Intel integrated GPU + one NVIDIA discrete GPU | Uses the compatible NVIDIA GPU through CUDA | Explicitly selects the first discrete GPU instead of the Intel integrated GPU | Uses NVIDIA total VRAM |
+| AMD integrated GPU + one NVIDIA discrete GPU | Uses the compatible NVIDIA GPU through CUDA | Explicitly selects the first discrete GPU and bypasses the AMD Switchable Graphics implicit layer for the Brush child process only | Uses NVIDIA total VRAM |
+| AMD only, or Intel integrated GPU + AMD discrete GPU | Falls back to CPU | Vulkan automatically selects an AMD GPU; the AMD graphics layer is not disabled | Currently uses the conservative Low profile |
+| Intel integrated or discrete GPU only | Falls back to CPU | Vulkan automatically selects an Intel GPU | Currently uses the conservative Low profile |
+| Multiple NVIDIA GPUs | Selects the compatible GPU with the highest Compute Capability, then the lower NVIDIA index on a tie | Does not force a Brush device index because Vulkan and CUDA indices cannot be mapped reliably; Vulkan selects automatically | Uses the total VRAM of the GPU selected for COLMAP |
+| AMD discrete GPU + NVIDIA discrete GPU | Uses a compatible NVIDIA GPU for COLMAP | Currently enters the single-NVIDIA preference path, but cross-vendor Vulkan ordering cannot be guaranteed; also set `brush_app.exe` to High performance in Windows Graphics settings and verify the actual adapter in the task log | Uses NVIDIA total VRAM |
+| Old NVIDIA driver, unsupported NVIDIA model, or failed detection | Falls back to CPU | Brush still attempts to select an available GPU through Vulkan but does not force NVIDIA | Currently uses the conservative Low profile |
+| No usable GPU graphics backend | Uses CPU for COLMAP | Brush may not start; CPU-only software graphics has not been validated end to end | Not applicable |
+| macOS: Apple Silicon M series, including Pro, Max, and Ultra | Currently uses the CPU; CUDA is not enabled | Automatically uses the M-series Metal GPU and unified memory | Currently stays on the conservative Low profile instead of scaling from unified-memory capacity |
+| Ubuntu Alpha: NVIDIA, AMD, or Intel GPU | Currently uses the CPU | Vulkan automatically selects an available GPU | Currently uses the conservative Low profile |
+
+Forced adapter selection and the AMD implicit-layer workaround are passed only to the individual `brush_app.exe` child process. OOOSplat does not modify the system environment, driver configuration, or other applications, and it does not switch Brush to D3D12. AMD-only systems do not receive the AMD implicit-layer workaround.
+
+If the Brush log reports `Device Lost`, OOOSplat distinguishes it from an out-of-memory failure and shows guidance, but it does not automatically lower quality and retry. Connect the computer to power, close other GPU-heavy applications, and set `brush_app.exe` to High performance under Windows Settings → System → Display → Graphics. Detailed quality lowers its profile and retries at most once only after an explicit out-of-memory failure.
+
+M-series CPUs and GPUs share unified memory, but the current Planner does not treat unified memory as dedicated VRAM. Consequently, even an M-series Pro, Max, or Ultra with substantial memory currently uses the Detailed Low profile. This is a conservative compatibility policy; it does not mean Metal training can access only a small portion of unified memory.
 
 ### Why does OOOSplat warn about a low registration rate?
 
@@ -411,9 +483,11 @@ Each project keeps a source-video copy, extracted frames, COLMAP data, and Brush
 
 ### Can I view final.ply directly in OOOSplat?
 
-Yes. Select “Preview” on a completed project in “02 Task History” to open its `.ply` in the dedicated preview workspace. “Adjust” edits the whole model's position, rotation, and uniform scale. “Animation” adds a 5-second reveal, an 8-second shockwave, a continuous orbit, and watermarked portrait MP4 export. Per-Gaussian selection, deletion, cropping, cleanup, `.sog`, and `.spz` are not supported yet.
+Yes. Select “Preview” on a completed project in “02 Task History” to open its `.ply` in the dedicated preview workspace. “Adjust” supports whole-model Transform plus rectangle, sphere, and box Gaussian selection, with non-destructive deletion, cropping, undo, and redo. Edit state is stored in the project; “Save” creates or updates the single `edit.ply`, while the original `final.ply` remains unchanged. “Animation” adds a 5-second reveal, an 8-second shockwave, a continuous orbit, and watermarked portrait MP4 export. `.sog` and `.spz` are not supported yet.
 
 ## Technology
+
+The preview Export menu supports portrait/landscape video and single-file offline HTML. HTML initially displays the complete edited result, with manual animation playback that pauses on mouse interaction. It prefers WebGPU and falls back to WebGL2, and contains no project paths, source media, logs, or telemetry. Development and build commands generate the offline runtime first; before running Rust alone, run `npm run build:html-viewer` if needed.
 
 - Desktop framework: Tauri 2
 - Backend: Rust and Tokio

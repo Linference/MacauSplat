@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{Result, SplatError};
 
+pub mod resources;
+
 #[cfg(unix)]
 fn signal_process_group(process_id: u32, signal: libc::c_int) -> std::io::Result<()> {
     // The child is made the leader of a new process group before spawn, so a
@@ -33,6 +35,28 @@ fn signal_process_group(process_id: u32, signal: libc::c_int) -> std::io::Result
             Ok(())
         } else {
             Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard(u32);
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        let _ = signal_process_group(self.0, libc::SIGKILL);
+    }
+}
+
+struct StreamTasksGuard {
+    finished: Arc<AtomicBool>,
+    handles: Vec<tokio::task::AbortHandle>,
+}
+impl Drop for StreamTasksGuard {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Relaxed);
+        for handle in &self.handles {
+            handle.abort();
         }
     }
 }
@@ -172,9 +196,25 @@ pub enum ProcessStream {
 
 #[derive(Debug, Clone)]
 pub enum ProcessUpdate {
-    Started { process_id: u32 },
-    Line { stream: ProcessStream, line: String },
-    Heartbeat { elapsed_ms: u64 },
+    LogOpened {
+        path: PathBuf,
+        offset: u64,
+    },
+    Exited {
+        executable: PathBuf,
+        exit_code: Option<i32>,
+    },
+    Started {
+        process_id: u32,
+    },
+    Line {
+        stream: ProcessStream,
+        line: String,
+    },
+    Heartbeat {
+        elapsed_ms: u64,
+    },
+    Resources(resources::ProcessResources),
 }
 
 pub type ProcessObserver = Arc<dyn Fn(ProcessUpdate) + Send + Sync>;
@@ -212,8 +252,9 @@ impl ProcessOutput {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ProcessManager {
+    lifecycle: Option<ProcessObserver>,
     cancellation: CancellationToken,
 }
 
@@ -221,7 +262,13 @@ impl ProcessManager {
     pub fn new() -> Self {
         Self {
             cancellation: CancellationToken::new(),
+            lifecycle: None,
         }
+    }
+
+    pub fn with_lifecycle(mut self, observer: ProcessObserver) -> Self {
+        self.lifecycle = Some(observer);
+        self
     }
 
     pub fn cancel(&self) {
@@ -233,6 +280,17 @@ impl ProcessManager {
     }
 
     pub async fn run(&self, spec: ProcessSpec) -> Result<ProcessOutput> {
+        self.run_with_environment(spec, &[]).await
+    }
+
+    /// Runs a child with overrides that apply only to that process. The parent
+    /// environment is never mutated, which keeps engine-specific GPU settings
+    /// from leaking into OOOSplat or other bundled tools.
+    pub async fn run_with_environment(
+        &self,
+        spec: ProcessSpec,
+        environment: &[(OsString, OsString)],
+    ) -> Result<ProcessOutput> {
         if !spec.executable.is_file() {
             return Err(SplatError::EngineMissing(
                 spec.executable.display().to_string(),
@@ -247,6 +305,7 @@ impl ProcessManager {
         let mut command = Command::new(&spec.executable);
         command
             .args(&spec.args)
+            .envs(environment.iter().map(|(key, value)| (key, value)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -274,6 +333,8 @@ impl ProcessManager {
         let process_id = child
             .id()
             .ok_or_else(|| SplatError::Process("无法读取子进程 ID".into()))?;
+        #[cfg(unix)]
+        let _group = ProcessGroupGuard(process_id);
         #[cfg(windows)]
         {
             if let Err(error) = job.assign(process_id) {
@@ -306,6 +367,12 @@ impl ProcessManager {
                 .append(true)
                 .open(path)
                 .await?;
+            if let Some(observer) = &self.lifecycle {
+                observer(ProcessUpdate::LogOpened {
+                    path: path.clone(),
+                    offset: file.metadata().await?.len(),
+                });
+            }
             let args = spec
                 .args
                 .iter()
@@ -338,6 +405,10 @@ impl ProcessManager {
             log_file.clone(),
         ));
         let finished = Arc::new(AtomicBool::new(false));
+        let resource_task = spec
+            .observer
+            .clone()
+            .map(|observer| resources::spawn(process_id, observer));
         let heartbeat_task = spec.observer.clone().map(|observer| {
             let finished = finished.clone();
             tokio::spawn(async move {
@@ -352,6 +423,14 @@ impl ProcessManager {
             })
         });
 
+        let mut stream_handles = vec![stdout_task.abort_handle(), stderr_task.abort_handle()];
+        if let Some(task) = &heartbeat_task {
+            stream_handles.push(task.abort_handle());
+        }
+        let _streams = StreamTasksGuard {
+            finished: finished.clone(),
+            handles: stream_handles,
+        };
         let status = tokio::select! {
             status = child.wait() => status?,
             _ = self.cancellation.cancelled() => {
@@ -375,6 +454,7 @@ impl ProcessManager {
                     let _ = child.wait().await;
                 }
                 finished.store(true, Ordering::Relaxed);
+                drop(resource_task);
                 stdout_task.abort();
                 stderr_task.abort();
                 if let Some(task) = heartbeat_task { task.abort(); }
@@ -387,6 +467,9 @@ impl ProcessManager {
             }
         };
         finished.store(true, Ordering::Relaxed);
+        if let Some(task) = resource_task {
+            task.stop().await;
+        }
         if let Some(task) = heartbeat_task {
             let _ = task.await;
         }
@@ -397,6 +480,12 @@ impl ProcessManager {
         let stderr = stderr_task
             .await
             .map_err(|error| SplatError::Process(error.to_string()))??;
+        if let Some(observer) = &self.lifecycle {
+            observer(ProcessUpdate::Exited {
+                executable: spec.executable.clone(),
+                exit_code: status.code(),
+            });
+        }
         let output = ProcessOutput {
             success: status.success(),
             exit_code: status.code(),
@@ -468,6 +557,38 @@ mod tests {
         assert!(detail.ends_with("early eof"));
         assert_eq!(detail.chars().count(), 4_096);
         assert!(!detail.contains("less useful stdout"));
+    }
+
+    #[tokio::test]
+    async fn child_environment_overrides_do_not_mutate_the_parent() {
+        const KEY: &str = "OOOSPLAT_PROCESS_ENV_ISOLATION_TEST";
+        let parent_value = std::env::var_os(KEY);
+        let environment = vec![(OsString::from(KEY), OsString::from("child-only"))];
+
+        #[cfg(windows)]
+        let spec = ProcessSpec {
+            executable: system_executable("cmd.exe"),
+            args: vec!["/C".into(), format!("echo %{KEY}%").into()],
+            working_directory: None,
+            log_path: None,
+            observer: None,
+        };
+        #[cfg(unix)]
+        let spec = ProcessSpec {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), format!("printf '%s' \"${KEY}\"").into()],
+            working_directory: None,
+            log_path: None,
+            observer: None,
+        };
+
+        let output = ProcessManager::new()
+            .run_with_environment(spec, &environment)
+            .await
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout.trim(), "child-only");
+        assert_eq!(std::env::var_os(KEY), parent_value);
     }
 
     #[cfg(windows)]

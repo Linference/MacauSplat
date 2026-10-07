@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectSystemLocale, LanguageProvider, readInitialLocale, translate, useI18n } from ".";
+import { detectSystemLocale, LanguageProvider, localizePipelineMessage, readInitialLocale, translate, useI18n } from ".";
 
 function Harness() {
   const { locale, t, toggleLocale, formatDuration } = useI18n();
@@ -53,16 +53,31 @@ describe("interface language", () => {
     expect(translate("en", "viewer.contextLost")).not.toContain("WebGL2");
   });
 
+  it("localizes image import and alpha preparation progress", () => {
+    expect(localizePipelineMessage("en", "正在导入图片 12/30 张")).toBe("Importing images 12/30");
+    expect(localizePipelineMessage("en", "正在导入补拍图片 3/8 张")).toBe("Importing reshoot images 3/8");
+    expect(localizePipelineMessage("en", "正在检测 Alpha 并生成 Mask 2/5 张")).toBe("Checking alpha and generating masks 2/5");
+    expect(localizePipelineMessage("en", "图片序列 30 张 · 1920×1080 · 检测到 Alpha 通道")).toBe("Image sequence 30 images · 1920×1080 · alpha channel detected");
+  });
+
+  it("localizes Brush device loss without exposing raw driver details", () => {
+    const message = "Splat 训练期间显卡设备连接中断。请接通电源、关闭占用显卡的软件，并在 Windows 图形设置中将 brush_app.exe 设为高性能后重试。\nParent device is lost";
+    expect(localizePipelineMessage("en", message)).toBe(
+      "The GPU device disconnected during Splat training. Connect the computer to power, close other GPU-heavy apps, set brush_app.exe to High performance in Windows Graphics settings, and try again.",
+    );
+    expect(localizePipelineMessage("zh-CN", message)).toBe(message);
+  });
+
   it("switches immediately, localizes formatting, and persists the explicit choice", async () => {
     window.localStorage.setItem("ooo-splat-language", "zh-CN");
     await act(async () => root.render(<LanguageProvider><Harness /></LanguageProvider>));
-    expect(container.textContent).toContain("01 创建新任务");
+    expect(container.textContent).toContain("创建新任务");
     expect(container.textContent).toContain("1 分 2 秒");
 
     const button = container.querySelector("button")!;
     await act(async () => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 
-    expect(container.textContent).toContain("01 Create New Task");
+    expect(container.textContent).toContain("Create New Task");
     expect(container.textContent).toContain("1m 2s");
     expect(window.localStorage.getItem("ooo-splat-language")).toBe("en");
     expect(document.documentElement.lang).toBe("en");

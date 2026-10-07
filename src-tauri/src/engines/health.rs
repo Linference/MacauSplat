@@ -1,7 +1,8 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,14 @@ pub enum ColmapBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum GpuDetectionState {
+    Ready,
+    TemporarilyUnavailable,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum AccelerationReasonCode {
     GpuReady,
     MacOsCpuOnly,
@@ -82,15 +91,48 @@ pub struct AccelerationRequirements {
 #[serde(rename_all = "camelCase")]
 pub struct ColmapAccelerationStatus {
     pub backend: ColmapBackend,
+    pub detection_state: GpuDetectionState,
     pub reason_code: AccelerationReasonCode,
     pub reason: String,
     pub device: Option<GpuDeviceInfo>,
     pub requirements: AccelerationRequirements,
+    #[serde(default)]
+    pub detected_nvidia_device_count: usize,
 }
 
 impl ColmapAccelerationStatus {
     pub const fn use_gpu(&self) -> bool {
         matches!(self.backend, ColmapBackend::Gpu)
+    }
+
+    /// Returns total VRAM only for a GPU that passed the existing NVIDIA
+    /// compatibility checks. CPU fallbacks may still retain diagnostic device
+    /// information, but must not opt Brush into a higher-memory profile.
+    pub fn usable_gpu_total_memory_mb(&self) -> Option<u64> {
+        self.use_gpu()
+            .then(|| {
+                self.device
+                    .as_ref()
+                    .and_then(|device| device.total_memory_mb)
+            })
+            .flatten()
+    }
+
+    /// Planning may keep using a recent, successful session probe while a
+    /// background refresh is temporarily unavailable. Task execution never
+    /// calls this fallback path and always performs a fresh probe.
+    pub fn planning_gpu_total_memory_mb(&self) -> Option<u64> {
+        (self.use_gpu()
+            && matches!(
+                self.detection_state,
+                GpuDetectionState::Ready | GpuDetectionState::TemporarilyUnavailable
+            ))
+        .then(|| {
+            self.device
+                .as_ref()
+                .and_then(|device| device.total_memory_mb)
+        })
+        .flatten()
     }
 
     pub fn gpu_index(&self) -> Option<u32> {
@@ -100,9 +142,35 @@ impl ColmapAccelerationStatus {
     }
 }
 
-const DEFAULT_MINIMUM_DRIVER: &str = "528.33";
-const DEFAULT_MINIMUM_COMPUTE_CAPABILITY: &str = "5.0";
+const DEFAULT_MINIMUM_DRIVER: &str = "580.00";
+const DEFAULT_MINIMUM_COMPUTE_CAPABILITY: &str = "7.5";
 const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCELERATION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const ACCELERATION_DIAGNOSTIC_LIMIT: u64 = 512 * 1024;
+const ACCELERATION_OUTPUT_LIMIT: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbePolicy {
+    Cached,
+    Refresh,
+    Task,
+}
+
+#[derive(Clone, Default)]
+pub struct AccelerationProbeService {
+    state: Arc<tokio::sync::Mutex<AccelerationProbeState>>,
+    run_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Default)]
+struct AccelerationProbeState {
+    last_good: Option<(Instant, ColmapAccelerationStatus)>,
+}
+
+fn acceleration_probe_service() -> &'static AccelerationProbeService {
+    static SERVICE: OnceLock<AccelerationProbeService> = OnceLock::new();
+    SERVICE.get_or_init(AccelerationProbeService::default)
+}
 
 #[derive(Debug, Clone)]
 pub struct EnginePaths {
@@ -128,7 +196,7 @@ impl EnginePaths {
         let paths = Self {
             ffmpeg: root.join("bin").join("ffmpeg"),
             ffprobe: root.join("bin").join("ffprobe"),
-            colmap: root.join("bin").join("colmap"),
+            colmap: macos_colmap_path(&root),
             brush: root.join("bin").join("brush_app"),
             root,
         };
@@ -136,8 +204,8 @@ impl EnginePaths {
         let paths = Self {
             ffmpeg: root.join("ffmpeg"),
             ffprobe: root.join("ffprobe"),
-            colmap: root.join("colmap"),
-            brush: root.join("brush_app"),
+            colmap: root.join("linux").join("colmap").join("bin").join("colmap"),
+            brush: root.join("linux").join("brush").join("brush_app"),
             root,
         };
         paths
@@ -172,20 +240,12 @@ impl EnginePaths {
                     std::slice::from_ref(&defaults.ffprobe),
                     "ffprobe",
                 ),
-                colmap: resolve_engine(
-                    "OOOSPLAT_COLMAP",
-                    std::slice::from_ref(&defaults.colmap),
-                    "colmap",
-                ),
-                brush: resolve_engine(
-                    "OOOSPLAT_BRUSH",
-                    &[
-                        defaults.brush.clone(),
-                        root.join("linux").join("brush").join("brush_app"),
-                        root.join("brush").join("brush_app"),
-                    ],
-                    "brush_app",
-                ),
+                colmap: defaults.colmap,
+                // Do not silently choose an old official Brush from PATH.
+                // Explicit diagnostic overrides are checked for the new CLI below.
+                brush: std::env::var_os("OOOSPLAT_BRUSH")
+                    .map(PathBuf::from)
+                    .unwrap_or(defaults.brush),
                 root,
             }
         };
@@ -240,13 +300,31 @@ impl EnginePaths {
     }
 
     pub async fn check_all(&self) -> Vec<EngineStatus> {
+        self.check_all_with_policy(ProbePolicy::Cached).await
+    }
+
+    pub async fn check_all_for_task(&self) -> Vec<EngineStatus> {
+        self.check_all_with_policy(ProbePolicy::Task).await
+    }
+
+    async fn check_all_with_policy(&self, policy: ProbePolicy) -> Vec<EngineStatus> {
         let (ffmpeg, ffprobe, colmap, brush) = tokio::join!(
             check_basic(EngineKind::Ffmpeg, &self.ffmpeg, &["-version"]),
             check_basic(EngineKind::Ffprobe, &self.ffprobe, &["-version"]),
-            check_colmap(&self.colmap, &self.root),
-            check_basic(EngineKind::Brush, &self.brush, &["--help"]),
+            check_colmap(&self.colmap, &self.root, policy),
+            check_brush(&self.brush),
         );
         vec![ffmpeg, ffprobe, colmap, brush]
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_colmap_path(root: &Path) -> PathBuf {
+    let standalone = root.join("colmap").join("bin").join("colmap");
+    if standalone.is_file() {
+        standalone
+    } else {
+        root.join("bin").join("colmap")
     }
 }
 
@@ -337,7 +415,54 @@ async fn check_basic(kind: EngineKind, path: &Path, args: &[&str]) -> EngineStat
     }
 }
 
-async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
+async fn check_brush(path: &Path) -> EngineStatus {
+    let mut status = check_basic(EngineKind::Brush, path, &["--version"]).await;
+    if !status.can_start {
+        return status;
+    }
+    if status.version.as_deref() != Some("brush-cli 1.0.0") {
+        status.can_start = false;
+        status.detail = "需要 OOOBrush ooo-v1.0.0 的无界面 brush-cli；请重新准备 Brush".into();
+        return status;
+    }
+    let manager = ProcessManager::new();
+    match manager
+        .run(ProcessSpec {
+            executable: path.to_path_buf(),
+            args: vec![OsString::from("--help")],
+            working_directory: path.parent().map(Path::to_path_buf),
+            log_path: None,
+            observer: None,
+        })
+        .await
+    {
+        Ok(output) => {
+            let help = format!("{}\n{}", output.stdout, output.stderr);
+            let missing: Vec<_> = super::brush::REQUIRED_CLI_FLAGS
+                .iter()
+                .filter(|flag| !help.split_whitespace().any(|token| token == **flag))
+                .copied()
+                .collect();
+            status.can_start = output.success && missing.is_empty();
+            status.detail = if status.can_start {
+                "OOOBrush ooo-v1.0.0 无界面 CLI 可启动；GPU 训练将在任务中验证".into()
+            } else {
+                format!(
+                    "OOOBrush CLI 参数检查失败，缺失参数：{}，退出码：{:?}",
+                    missing.join(", "),
+                    output.exit_code
+                )
+            };
+        }
+        Err(error) => {
+            status.can_start = false;
+            status.detail = error.to_string();
+        }
+    }
+    status
+}
+
+async fn check_colmap(path: &Path, engines_root: &Path, probe_policy: ProbePolicy) -> EngineStatus {
     if !path.is_file() {
         let mut status = missing(EngineKind::Colmap, path);
         status.acceleration = Some(cpu_status(
@@ -356,7 +481,10 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
     for args in [
         vec!["feature_extractor", "-h"],
         vec!["sequential_matcher", "-h"],
+        vec!["exhaustive_matcher", "-h"],
+        vec!["matches_importer", "-h"],
         vec!["mapper", "-h"],
+        vec!["bundle_adjuster", "-h"],
     ] {
         let command_name = args[0];
         match manager
@@ -370,8 +498,9 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
             .await
         {
             Ok(output) => {
-                successful &= output.success;
                 let command_help = format!("{}\n{}", output.stdout, output.stderr);
+                successful &= output.success
+                    && colmap_command_has_required_options(command_name, &command_help);
                 match command_name {
                     "feature_extractor" => feature_help = command_help.clone(),
                     "sequential_matcher" => matching_help = command_help.clone(),
@@ -401,6 +530,8 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
     }
 
     let cli_family = detect_cli_family(&feature_help, &matching_help);
+    let locked_build = super::colmap::is_locked_build(&feature_help);
+    successful &= colmap_identity_accepted(locked_build);
     successful &= cli_family.is_some();
     #[cfg(target_os = "macos")]
     let cpu_only = Some(true);
@@ -415,7 +546,8 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
         ]
         .iter()
         .any(|marker| lower.contains(marker));
-        let bundled_cuda = path.parent().is_some_and(runtime_contains_cuda);
+        let bundled_cuda =
+            lower.contains("with cuda") || path.parent().is_some_and(runtime_contains_cuda);
         if bundled_cuda {
             Some(false)
         } else if explicit_cpu {
@@ -428,10 +560,17 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(|line| line.trim().to_owned());
+    let unavailable_reason = if cli_family.is_none() {
+        "COLMAP 缺少 OOOSplat 所需的 SIFT 提取或匹配参数".into()
+    } else if !colmap_identity_accepted(locked_build) {
+        "COLMAP 版本/commit 不匹配；请安装锁定的 COLMAP 4.2.1 引擎包".into()
+    } else {
+        "COLMAP 必需命令无法正常启动".into()
+    };
     let acceleration = if !successful {
         cpu_status(
             AccelerationReasonCode::ColmapUnavailable,
-            "COLMAP 必需命令无法正常启动，不能启用 GPU 加速".into(),
+            unavailable_reason,
             None,
             requirements_or_default(engines_root),
         )
@@ -450,7 +589,7 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
             requirements_or_default(engines_root),
         )
     } else {
-        detect_acceleration(engines_root).await
+        detect_acceleration(engines_root, probe_policy).await
     };
     let family_label = cli_family.map_or("不支持的 CLI", ColmapCliFamily::label);
     #[cfg(target_os = "macos")]
@@ -462,6 +601,17 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
         }
         Some(false) => format!("{family_label}；{}", acceleration.reason),
         None => format!("三个必需命令可启动；{family_label}；未明确报告 CUDA 构建状态"),
+    };
+    let ba = super::colmap_ba::select(path, acceleration.gpu_index()).await;
+    let detail = if !locked_build && cfg!(feature = "local-colmap") {
+        format!(
+            "{detail}；本地开发模式接受能力兼容的非锁定 COLMAP；{}",
+            ba.detail
+        )
+    } else if !locked_build {
+        "COLMAP 版本/commit 不匹配；请安装锁定的 COLMAP 4.2.1 引擎包".into()
+    } else {
+        format!("{detail}；{}", ba.detail)
     };
     EngineStatus {
         kind: EngineKind::Colmap,
@@ -476,33 +626,77 @@ async fn check_colmap(path: &Path, engines_root: &Path) -> EngineStatus {
     }
 }
 
+fn colmap_identity_accepted(locked_build: bool) -> bool {
+    locked_build || cfg!(feature = "local-colmap")
+}
+
+fn colmap_command_has_required_options(command: &str, help: &str) -> bool {
+    let required: &[&str] = match command {
+        "feature_extractor" => &[
+            "--database_path",
+            "--image_path",
+            "--image_list_path",
+            "--ImageReader.camera_model",
+            "--ImageReader.mask_path",
+            "--ImageReader.existing_camera_id",
+        ],
+        "sequential_matcher" => &["--database_path", "--SequentialMatching.overlap"],
+        "exhaustive_matcher" => &["--database_path"],
+        "matches_importer" => &["--database_path", "--match_list_path", "--match_type"],
+        "mapper" => &[
+            "--database_path",
+            "--image_path",
+            "--input_path",
+            "--output_path",
+            "--Mapper.image_list_path",
+            "--Mapper.fix_existing_frames",
+        ],
+        "bundle_adjuster" => &["--input_path", "--output_path"],
+        _ => return false,
+    };
+    required.iter().all(|option| help.contains(option))
+}
+
 #[cfg(any(not(target_os = "macos"), test))]
 fn runtime_contains_cuda(directory: &Path) -> bool {
-    let mut found = [false; 3];
+    let mut found = [false; 2];
     scan_cuda_runtime(directory, &mut found);
     found.into_iter().all(|present| present)
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
-fn scan_cuda_runtime(directory: &Path, found: &mut [bool; 3]) {
+fn scan_cuda_runtime(directory: &Path, found: &mut [bool; 2]) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if path.is_dir() && !path.is_symlink() {
             scan_cuda_runtime(&path, found);
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        found[0] |= name.contains("cudart64_");
-        found[1] |= name.contains("curand64_");
-        found[2] |= name == "onnxruntime_providers_cuda.dll";
+        found[0] |= name.contains("cudart64_") || name.starts_with("libcudart.so");
+        found[1] |= name.contains("curand64_") || name.starts_with("libcurand.so");
     }
 }
 
 pub async fn check_colmap_acceleration(paths: &EnginePaths) -> ColmapAccelerationStatus {
-    check_colmap(&paths.colmap, &paths.root)
+    check_colmap(&paths.colmap, &paths.root, ProbePolicy::Refresh)
+        .await
+        .acceleration
+        .unwrap_or_else(|| {
+            cpu_status(
+                AccelerationReasonCode::ColmapUnavailable,
+                "无法读取 COLMAP 加速状态，已使用 CPU".into(),
+                None,
+                requirements_or_default(&paths.root),
+            )
+        })
+}
+
+pub async fn check_colmap_acceleration_cached(paths: &EnginePaths) -> ColmapAccelerationStatus {
+    check_colmap(&paths.colmap, &paths.root, ProbePolicy::Cached)
         .await
         .acceleration
         .unwrap_or_else(|| {
@@ -521,7 +715,9 @@ struct NumericVersion(u32, u32);
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EngineManifest {
+    #[serde(default)]
     engines: Vec<ManifestEngine>,
+    colmap: Option<ManifestEngine>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,17 +730,24 @@ struct ManifestEngine {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestCudaCompatibility {
+    #[serde(alias = "minimumDriver")]
     minimum_windows_driver: String,
     minimum_compute_capability: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ProbeError {
     NotFound,
     Failed,
     Timeout,
     NoGpu,
     InvalidOutput,
+}
+
+impl ProbeError {
+    const fn is_transient(self) -> bool {
+        matches!(self, Self::Failed | Self::Timeout | Self::InvalidOutput)
+    }
 }
 
 fn default_requirements() -> AccelerationRequirements {
@@ -559,7 +762,11 @@ fn requirements_or_default(engines_root: &Path) -> AccelerationRequirements {
 }
 
 fn load_requirements(engines_root: &Path) -> std::result::Result<AccelerationRequirements, String> {
-    let path = engines_root.join("manifest.json");
+    let path = engines_root.join(if cfg!(target_os = "linux") {
+        "manifest.linux.json"
+    } else {
+        "manifest.json"
+    });
     let bytes =
         std::fs::read(&path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
     let manifest: EngineManifest = serde_json::from_slice(&bytes)
@@ -567,6 +774,7 @@ fn load_requirements(engines_root: &Path) -> std::result::Result<AccelerationReq
     let compatibility = manifest
         .engines
         .into_iter()
+        .chain(manifest.colmap)
         .find(|engine| engine.name.eq_ignore_ascii_case("COLMAP"))
         .and_then(|engine| engine.cuda_compatibility)
         .ok_or_else(|| "引擎清单缺少 COLMAP cudaCompatibility".to_string())?;
@@ -588,14 +796,16 @@ fn cpu_status(
 ) -> ColmapAccelerationStatus {
     ColmapAccelerationStatus {
         backend: ColmapBackend::Cpu,
+        detection_state: GpuDetectionState::Unavailable,
         reason_code,
         reason,
         device,
         requirements,
+        detected_nvidia_device_count: 0,
     }
 }
 
-async fn detect_acceleration(engines_root: &Path) -> ColmapAccelerationStatus {
+async fn detect_acceleration(engines_root: &Path, policy: ProbePolicy) -> ColmapAccelerationStatus {
     let requirements = match load_requirements(engines_root) {
         Ok(requirements) => requirements,
         Err(error) => {
@@ -607,11 +817,107 @@ async fn detect_acceleration(engines_root: &Path) -> ColmapAccelerationStatus {
             )
         }
     };
-    let devices = match probe_gpu_devices().await {
-        Ok(devices) => devices,
-        Err(error) => return probe_error_status(error, requirements),
-    };
-    choose_acceleration(devices, requirements)
+    acceleration_probe_service()
+        .probe(requirements, policy)
+        .await
+}
+
+impl AccelerationProbeService {
+    async fn probe(
+        &self,
+        requirements: AccelerationRequirements,
+        policy: ProbePolicy,
+    ) -> ColmapAccelerationStatus {
+        if policy == ProbePolicy::Cached {
+            if let Some(status) = self.fresh_status().await {
+                return status;
+            }
+        }
+
+        // Serialize nvidia-smi calls. A white-screen recovery and a source
+        // analysis can otherwise start several copies at the same time. A
+        // planning-only request never waits behind a slow startup probe.
+        let _run_guard = if policy == ProbePolicy::Cached {
+            match self.run_lock.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return transient_probe_status(ProbeError::Failed, requirements, None),
+            }
+        } else {
+            self.run_lock.lock().await
+        };
+        if policy == ProbePolicy::Cached {
+            if let Some(status) = self.fresh_status().await {
+                return status;
+            }
+        }
+
+        let attempts = if policy == ProbePolicy::Refresh { 1 } else { 3 };
+        let mut last_error = ProbeError::Failed;
+        for attempt in 0..attempts {
+            match probe_gpu_devices().await {
+                Ok(devices) => {
+                    let status = choose_acceleration(devices, requirements.clone());
+                    self.state.lock().await.last_good = Some((Instant::now(), status.clone()));
+                    append_acceleration_diagnostic(&format!(
+                        "attempt={} outcome=success backend={:?} devices={}",
+                        attempt + 1,
+                        status.backend,
+                        status.detected_nvidia_device_count
+                    ));
+                    return status;
+                }
+                Err(error) => {
+                    last_error = error;
+                    append_acceleration_diagnostic(&format!(
+                        "attempt={} outcome={error:?}",
+                        attempt + 1
+                    ));
+                    if !error.is_transient() {
+                        return probe_error_status(error, requirements);
+                    }
+                    if attempt + 1 < attempts {
+                        tokio::time::sleep(Duration::from_secs((attempt + 1) as u64)).await;
+                    }
+                }
+            }
+        }
+
+        let cached = if policy == ProbePolicy::Task {
+            None
+        } else {
+            self.fresh_status().await
+        };
+        transient_probe_status(last_error, requirements, cached)
+    }
+
+    async fn fresh_status(&self) -> Option<ColmapAccelerationStatus> {
+        self.state
+            .lock()
+            .await
+            .last_good
+            .as_ref()
+            .filter(|(recorded, _)| recorded.elapsed() <= ACCELERATION_CACHE_TTL)
+            .map(|(_, status)| status.clone())
+    }
+}
+
+fn transient_probe_status(
+    error: ProbeError,
+    requirements: AccelerationRequirements,
+    cached: Option<ColmapAccelerationStatus>,
+) -> ColmapAccelerationStatus {
+    let fallback = probe_error_status(error, requirements);
+    if let Some(mut status) = cached {
+        status.detection_state = GpuDetectionState::TemporarilyUnavailable;
+        status.reason_code = fallback.reason_code;
+        status.reason = format!(
+            "NVIDIA 显卡暂时无法检测；继续显示本次运行中最近一次有效结果。{}",
+            fallback.reason
+        );
+        status
+    } else {
+        fallback
+    }
 }
 
 fn probe_error_status(
@@ -640,13 +946,18 @@ fn probe_error_status(
             "NVIDIA 显卡检测失败，已使用 CPU",
         ),
     };
-    cpu_status(reason_code, reason.into(), None, requirements)
+    let mut status = cpu_status(reason_code, reason.into(), None, requirements);
+    if error.is_transient() {
+        status.detection_state = GpuDetectionState::TemporarilyUnavailable;
+    }
+    status
 }
 
 fn choose_acceleration(
     devices: Vec<GpuDeviceInfo>,
     requirements: AccelerationRequirements,
 ) -> ColmapAccelerationStatus {
+    let detected_nvidia_device_count = devices.len();
     let minimum_driver = parse_version(&requirements.minimum_driver_version)
         .expect("validated acceleration requirement");
     let minimum_compute = parse_version(&requirements.minimum_compute_capability)
@@ -668,6 +979,7 @@ fn choose_acceleration(
     if let Some((_, _, device)) = compatible.into_iter().next() {
         return ColmapAccelerationStatus {
             backend: ColmapBackend::Gpu,
+            detection_state: GpuDetectionState::Ready,
             reason_code: AccelerationReasonCode::GpuReady,
             reason: format!(
                 "已启用 {}（驱动 {}，Compute Capability {}）",
@@ -675,6 +987,7 @@ fn choose_acceleration(
             ),
             device: Some(device),
             requirements,
+            detected_nvidia_device_count,
         };
     }
 
@@ -738,32 +1051,122 @@ fn choose_acceleration(
     )
 }
 
+pub(crate) async fn diagnostic_gpu_devices() -> Vec<GpuDeviceInfo> {
+    probe_gpu_devices().await.unwrap_or_default()
+}
+
 async fn probe_gpu_devices() -> std::result::Result<Vec<GpuDeviceInfo>, ProbeError> {
     let candidate = nvidia_smi_candidates()
         .into_iter()
-        .find(|candidate| candidate.is_file())
-        .ok_or(ProbeError::NotFound)?;
+        .find(|candidate| candidate.is_file());
+    let Some(candidate) = candidate else {
+        append_acceleration_diagnostic("outcome=NotFound path=nvidia-smi");
+        return Err(ProbeError::NotFound);
+    };
     let manager = ProcessManager::new();
-    let result = tokio::time::timeout(
-        NVIDIA_SMI_TIMEOUT,
-        manager.run(ProcessSpec {
-            executable: candidate,
-            args: vec![
-                OsString::from("--query-gpu=index,name,driver_version,compute_cap,memory.total"),
-                OsString::from("--format=csv,noheader,nounits"),
-            ],
-            working_directory: None,
-            log_path: None,
-            observer: None,
-        }),
-    )
-    .await
-    .map_err(|_| ProbeError::Timeout)?
-    .map_err(|_| ProbeError::Failed)?;
+    let run = manager.run(ProcessSpec {
+        executable: candidate.clone(),
+        args: vec![
+            OsString::from("--query-gpu=index,name,driver_version,compute_cap,memory.total"),
+            OsString::from("--format=csv,noheader,nounits"),
+        ],
+        working_directory: None,
+        log_path: None,
+        observer: None,
+    });
+    tokio::pin!(run);
+    let result = match tokio::time::timeout(NVIDIA_SMI_TIMEOUT, &mut run).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            append_acceleration_diagnostic(&format!(
+                "path={} process_error={}",
+                candidate.display(),
+                bounded_diagnostic(&error.to_string())
+            ));
+            return Err(ProbeError::Failed);
+        }
+        Err(_) => {
+            manager.cancel();
+            let _ = run.await;
+            append_acceleration_diagnostic(&format!(
+                "path={} timeout_ms={}",
+                candidate.display(),
+                NVIDIA_SMI_TIMEOUT.as_millis()
+            ));
+            return Err(ProbeError::Timeout);
+        }
+    };
+    append_acceleration_diagnostic(&format!(
+        "path={} exit={:?} stdout={} stderr={}",
+        candidate.display(),
+        result.exit_code,
+        bounded_diagnostic(&result.stdout),
+        bounded_diagnostic(&result.stderr)
+    ));
     if !result.success {
         return Err(ProbeError::Failed);
     }
     parse_nvidia_smi_csv(&result.stdout)
+}
+
+fn bounded_diagnostic(value: &str) -> String {
+    let normalized = value.replace(['\r', '\n'], " ");
+    if normalized.len() <= ACCELERATION_OUTPUT_LIMIT {
+        return normalized;
+    }
+    let mut end = ACCELERATION_OUTPUT_LIMIT;
+    while !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &normalized[..end])
+}
+
+fn acceleration_diagnostic_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library").join("Logs"));
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("state"))
+        });
+    root.map(|root| root.join("SplatStudio").join("engine-health.log"))
+}
+
+fn append_acceleration_diagnostic(message: &str) {
+    use std::io::Write;
+
+    let Some(path) = acceleration_diagnostic_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() >= ACCELERATION_DIAGNOSTIC_LIMIT)
+    {
+        let _ = std::fs::write(&path, []);
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{timestamp} {message}");
+    }
 }
 
 fn parse_nvidia_smi_csv(output: &str) -> std::result::Result<Vec<GpuDeviceInfo>, ProbeError> {
@@ -798,7 +1201,7 @@ fn parse_version(value: &str) -> Option<NumericVersion> {
     Some(NumericVersion(major, minor))
 }
 
-fn nvidia_smi_candidates() -> Vec<PathBuf> {
+pub(crate) fn nvidia_smi_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     #[cfg(windows)]
     match std::env::var_os("SystemRoot") {
@@ -833,10 +1236,17 @@ mod tests {
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
-    fn linux_root_is_flat_and_discovery_can_fall_back_to_path() {
+    fn linux_colmap_is_managed_without_path_fallback() {
         let paths = EnginePaths::from_root("/opt/ooosplat-engines");
-        assert_eq!(paths.colmap, PathBuf::from("/opt/ooosplat-engines/colmap"));
+        assert_eq!(
+            paths.colmap,
+            PathBuf::from("/opt/ooosplat-engines/linux/colmap/bin/colmap")
+        );
         let discovered = EnginePaths::from_candidates(PathBuf::from("/missing/engines"));
+        assert_eq!(
+            discovered.colmap,
+            PathBuf::from("/missing/engines/linux/colmap/bin/colmap")
+        );
         // FFmpeg is not installed on every contributor machine or CI runner, so assert
         // the resolver contract instead of requiring the binary: an explicit override
         // wins, then PATH, and otherwise the managed path is kept so engine health can
@@ -873,6 +1283,26 @@ mod tests {
         assert_eq!(paths.brush, root.join("brush").join("brush_app.exe"));
     }
 
+    #[tokio::test]
+    #[ignore = "Requires npm run setup:brush on a matching native host"]
+    async fn managed_ooobrush_cli_health_smoke() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("engines");
+        #[cfg(target_os = "macos")]
+        let root = root.join("macos").join("arm64");
+        let paths = EnginePaths::from_root(root);
+        let status = check_brush(&paths.brush).await;
+        assert!(
+            status.can_start,
+            "{}: {}",
+            paths.brush.display(),
+            status.detail
+        );
+        assert_eq!(status.version.as_deref(), Some("brush-cli 1.0.0"));
+    }
+
     fn device(index: u32, driver: &str, compute: &str) -> GpuDeviceInfo {
         GpuDeviceInfo {
             index,
@@ -900,6 +1330,13 @@ mod tests {
         let devices =
             parse_nvidia_smi_csv("0, NVIDIA GeForce RTX 3060 Ti, 560.81, 8.6, N/A\n").unwrap();
         assert_eq!(devices[0].total_memory_mb, None);
+        let devices = devices
+            .into_iter()
+            .map(|mut device| {
+                device.driver_version = DEFAULT_MINIMUM_DRIVER.into();
+                device
+            })
+            .collect();
         assert_eq!(
             choose_acceleration(devices, requirements()).backend,
             ColmapBackend::Gpu
@@ -917,18 +1354,26 @@ mod tests {
 
     #[test]
     fn accepts_exact_compatibility_boundaries() {
-        let status = choose_acceleration(vec![device(0, "528.33", "5.0")], requirements());
+        let status = choose_acceleration(vec![device(0, "580.00", "7.5")], requirements());
         assert_eq!(status.backend, ColmapBackend::Gpu);
         assert_eq!(status.reason_code, AccelerationReasonCode::GpuReady);
+        assert_eq!(status.usable_gpu_total_memory_mb(), Some(8_192));
+        assert_eq!(status.detected_nvidia_device_count, 1);
     }
 
     #[test]
     fn rejects_old_driver_and_low_compute_capability() {
-        let old_driver = choose_acceleration(vec![device(0, "528.32", "8.6")], requirements());
+        let old_driver = choose_acceleration(vec![device(0, "579.99", "8.6")], requirements());
         assert_eq!(old_driver.backend, ColmapBackend::Cpu);
         assert_eq!(old_driver.reason_code, AccelerationReasonCode::DriverTooOld);
+        assert_eq!(
+            old_driver.device.as_ref().unwrap().total_memory_mb,
+            Some(8_192)
+        );
+        assert_eq!(old_driver.usable_gpu_total_memory_mb(), None);
+        assert_eq!(old_driver.planning_gpu_total_memory_mb(), None);
 
-        let old_gpu = choose_acceleration(vec![device(0, "560.81", "4.9")], requirements());
+        let old_gpu = choose_acceleration(vec![device(0, "580.00", "7.4")], requirements());
         assert_eq!(old_gpu.backend, ColmapBackend::Cpu);
         assert_eq!(
             old_gpu.reason_code,
@@ -940,12 +1385,13 @@ mod tests {
     fn selects_highest_compute_capability_then_lowest_index() {
         let status = choose_acceleration(
             vec![
-                device(2, "560.81", "8.6"),
-                device(1, "560.81", "8.9"),
-                device(0, "560.81", "8.9"),
+                device(2, "580.00", "8.6"),
+                device(1, "580.00", "8.9"),
+                device(0, "580.00", "8.9"),
             ],
             requirements(),
         );
+        assert_eq!(status.detected_nvidia_device_count, 3);
         assert_eq!(status.device.unwrap().index, 0);
     }
 
@@ -967,7 +1413,39 @@ mod tests {
             let status = probe_error_status(error, requirements());
             assert_eq!(status.backend, ColmapBackend::Cpu);
             assert_eq!(status.reason_code, reason);
+            assert_eq!(
+                status.detection_state,
+                if error.is_transient() {
+                    GpuDetectionState::TemporarilyUnavailable
+                } else {
+                    GpuDetectionState::Unavailable
+                }
+            );
         }
+    }
+
+    #[test]
+    fn transient_probe_keeps_a_recent_result_for_planning_only() {
+        let cached = choose_acceleration(vec![device(0, "580.00", "8.6")], requirements());
+        let status = transient_probe_status(ProbeError::Timeout, requirements(), Some(cached));
+        assert_eq!(status.backend, ColmapBackend::Gpu);
+        assert_eq!(
+            status.detection_state,
+            GpuDetectionState::TemporarilyUnavailable
+        );
+        assert_eq!(status.planning_gpu_total_memory_mb(), Some(8_192));
+    }
+
+    #[tokio::test]
+    async fn cached_planning_probe_never_waits_behind_an_active_probe() {
+        let service = AccelerationProbeService::default();
+        let _active_probe = service.run_lock.lock().await;
+        let status = service.probe(requirements(), ProbePolicy::Cached).await;
+        assert_eq!(status.backend, ColmapBackend::Cpu);
+        assert_eq!(
+            status.detection_state,
+            GpuDetectionState::TemporarilyUnavailable
+        );
     }
 
     #[test]
@@ -975,8 +1453,58 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("cudart64_12.dll"), []).unwrap();
         std::fs::write(directory.path().join("curand64_10.dll"), []).unwrap();
-        assert!(!runtime_contains_cuda(directory.path()));
-        std::fs::write(directory.path().join("onnxruntime_providers_cuda.dll"), []).unwrap();
         assert!(runtime_contains_cuda(directory.path()));
+    }
+
+    #[test]
+    fn macos_prefers_standalone_colmap_without_changing_other_engine_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let legacy = root.join("bin").join("colmap");
+        assert_eq!(macos_colmap_path(root), legacy);
+        let standalone = root.join("colmap").join("bin").join("colmap");
+        std::fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, []).unwrap();
+        std::fs::write(&standalone, []).unwrap();
+        assert_eq!(macos_colmap_path(root), standalone);
+        std::fs::remove_file(&standalone).unwrap();
+        assert_eq!(macos_colmap_path(root), legacy);
+    }
+
+    #[test]
+    fn locked_colmap_identity_is_always_accepted() {
+        assert!(colmap_identity_accepted(true));
+    }
+
+    #[test]
+    fn local_colmap_capability_check_rejects_missing_options() {
+        let mapper = [
+            "--database_path",
+            "--image_path",
+            "--input_path",
+            "--output_path",
+            "--Mapper.image_list_path",
+            "--Mapper.fix_existing_frames",
+        ]
+        .join("\n");
+        assert!(colmap_command_has_required_options("mapper", &mapper));
+        assert!(!colmap_command_has_required_options(
+            "mapper",
+            &mapper.replace("--Mapper.fix_existing_frames", "")
+        ));
+        assert!(!colmap_command_has_required_options("unknown", &mapper));
+    }
+
+    #[test]
+    #[cfg(not(feature = "local-colmap"))]
+    fn formal_build_rejects_an_unlocked_colmap_identity() {
+        assert!(!colmap_identity_accepted(false));
+    }
+
+    #[test]
+    #[cfg(feature = "local-colmap")]
+    fn local_build_accepts_an_unlocked_colmap_identity() {
+        assert!(colmap_identity_accepted(false));
     }
 }

@@ -13,6 +13,7 @@ pub enum EventKind {
     Log,
     Heartbeat,
     Capability,
+    Runtime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,12 @@ pub enum PipelineEngine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineEvent {
+    #[serde(default)]
+    pub task_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub run_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub revision: u64,
     pub sequence: u64,
     pub timestamp: DateTime<Utc>,
     pub kind: EventKind,
@@ -50,6 +57,8 @@ pub struct PipelineEvent {
     pub unit: Option<String>,
     pub elapsed_ms: u64,
     pub acceleration: Option<ColmapAccelerationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<super::runtime::RuntimeSnapshot>,
 }
 
 impl PipelineEvent {
@@ -57,6 +66,9 @@ impl PipelineEvent {
         let bounded = stage_progress.clamp(0.0, 1.0);
         let (start, end) = stage_progress_range(stage);
         Self {
+            task_id: None,
+            run_id: None,
+            revision: 0,
             sequence: 0,
             timestamp: Utc::now(),
             kind: EventKind::Stage,
@@ -72,6 +84,7 @@ impl PipelineEvent {
             unit: None,
             elapsed_ms: 0,
             acceleration: None,
+            runtime: None,
         }
     }
 }

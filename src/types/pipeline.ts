@@ -4,6 +4,7 @@ export type RunPhase = "idle" | "analyzing" | "running" | "completed" | "failed"
 export type ProjectStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 export type ColmapBackend = "cpu" | "gpu";
+export type GpuDetectionState = "ready" | "temporarilyUnavailable" | "unavailable";
 export type AccelerationReasonCode =
   | "gpuReady" | "macOsCpuOnly" | "colmapUnavailable" | "colmapCudaUnavailable" | "requirementsUnavailable"
   | "nvidiaSmiNotFound" | "probeFailed" | "probeTimeout" | "noNvidiaGpu"
@@ -13,10 +14,12 @@ export interface GpuDeviceInfo { index: number; name: string; driverVersion: str
 export interface AccelerationRequirements { minimumDriverVersion: string; minimumComputeCapability: string; }
 export interface ColmapAccelerationStatus {
   backend: ColmapBackend;
+  detectionState: GpuDetectionState;
   reasonCode: AccelerationReasonCode;
   reason: string;
   device: GpuDeviceInfo | null;
   requirements: AccelerationRequirements;
+  detectedNvidiaDeviceCount?: number;
 }
 export interface EngineStatus { kind: EngineKind; path: string; exists: boolean; canStart: boolean; version: string | null; cpuOnly: boolean | null; acceleration: ColmapAccelerationStatus | null; colmapCliFamily?: "legacy39" | "modern4"; detail: string; }
 export interface VideoInfo {
@@ -38,7 +41,16 @@ export interface ImageSequenceInfo {
   hasAlpha: boolean;
   requiresLargeSequenceConfirmation: boolean;
 }
-export interface FramePlan { retentionRatio: number; samplingFps: number; estimatedFrames: number; }
+export interface PlannedFrame { sourceFrameIndex: number; timestampSeconds: number; }
+export interface FramePlan {
+  retentionRatio: number;
+  samplingFps: number;
+  estimatedFrames: number;
+  selectedFrames?: PlannedFrame[];
+  candidateFrames?: PlannedFrame[];
+  rescueMaxFrames?: number;
+  minimumFrameOverrideApplied?: boolean;
+}
 export interface RuntimeEstimate {
   estimatedMs: number;
   lowerBoundMs: number;
@@ -55,10 +67,39 @@ export interface ProbeAndPlan {
   estimate: RuntimeEstimate;
 }
 
+export interface ReshootSourceInfo {
+  projectId: string;
+  projectName: string;
+  quality: Quality;
+  plannerEnabled: boolean;
+  cameraId: number;
+  cameraModel: string;
+  width: number;
+  height: number;
+  sourceImageCount: number;
+  eligible: boolean;
+  reason: string | null;
+}
+
+export interface ReshootInputInfo {
+  inputType: InputType;
+  imageCount: number | null;
+  duration: number | null;
+  preparedWidth: number;
+  preparedHeight: number;
+  estimatedFrames: number;
+  hasAlpha: boolean;
+  maskCount: number;
+  compatible: boolean;
+  incompatibilityReason: string | null;
+  estimate: RuntimeEstimate;
+}
+
 export interface PipelineEvent {
+  taskId?: string | null; runId?: string | null; revision?: number;
   sequence: number;
   timestamp: string;
-  kind: "stage" | "progress" | "log" | "heartbeat" | "capability";
+  kind: "stage" | "progress" | "log" | "heartbeat" | "capability" | "runtime";
   level: "info" | "warning" | "error";
   stage: string;
   engine: "system" | "ffmpeg" | "colmap" | "brush" | null;
@@ -71,6 +112,42 @@ export interface PipelineEvent {
   unit: string | null;
   elapsedMs: number;
   acceleration: ColmapAccelerationStatus | null;
+  runtime?: RuntimeSnapshot | null;
+}
+
+export interface RuntimeSnapshot {
+  processId: number;
+  phase: string;
+  updatedAt: string;
+  lastOutputAgeMs: number;
+  training: {
+    iteration: number | null;
+    total: number | null;
+    startIter: number;
+    lod: number;
+    stepsPerSecond: number | null;
+    remainingSeconds: number | null;
+    splatCount: number | null;
+    psnr: number | null;
+    ssim: number | null;
+  } | null;
+  device: string | null;
+  backend: string | null;
+  config: Record<string, string>;
+  resources: {
+    processId: number;
+    sampledAt: string;
+    cpuPercent: number | null;
+    memoryBytes: number | null;
+    gpuStatus: "available" | "unavailable" | "unsupported";
+    gpus: Array<{
+      uuid: string;
+      name: string;
+      utilizationPercent: number | null;
+      memoryUsedMib: number | null;
+      memoryTotalMib: number | null;
+    }>;
+  } | null;
 }
 
 export interface PipelineResult {
@@ -91,6 +168,8 @@ export interface PipelineResult {
 
 export interface ProjectSummary {
   id: string;
+  workspaceTaskId?: string | null;
+  taskKind?: "generation" | "reshoot";
   name: string;
   status: ProjectStatus;
   projectPath: string;
@@ -107,8 +186,35 @@ export interface ProjectSummary {
   failureMessage: string | null;
 }
 
-export interface ProjectOverview { projectsRoot: string; projects: ProjectSummary[]; }
-export interface AppRuntimeStatus { pipelineRunning: boolean; previewProjectId: string | null; }
+export interface AppSettings { schemaVersion: number; projectsRoot: string; plannerEnabled: boolean; }
+export interface ProjectOverview { projectsRoot: string; plannerEnabled: boolean; projects: ProjectSummary[]; }
+export interface AppRuntimeStatus {
+  pipelineRunning: boolean;
+  pipelineProjectId?: string | null;
+  pipelineWorkspaceTaskId?: string | null;
+  pipelineRunElapsedMs: number;
+  pipelineElapsedOffsetMs: number;
+  previewProjectId: string | null;
+  taskAcceleration: ColmapAccelerationStatus | null;
+}
+
+export interface ProjectTaskLogLine { source: string; message: string; }
+export interface ProjectTaskDetail {
+  project: ProjectSummary;
+  inputType: InputType;
+  sourcePath: string;
+  projectsRoot: string;
+  plannerEnabled: boolean;
+  estimatedFrames: number | null;
+  stage: string;
+  progress: number;
+  inputImages: number | null;
+  registeredImages: number | null;
+  video: VideoInfo | null;
+  imageSequence: ImageSequenceInfo | null;
+  sourceProjectId: string | null;
+  logs: ProjectTaskLogLine[];
+}
 
 export type GaussianFormat = "ply" | "sog" | "spz";
 export interface GaussianTransform {
@@ -158,6 +264,31 @@ export interface GaussianExportResult {
 export interface GaussianVideoExportSession {
   exportId: string;
   destinationPath: string;
+}
+
+export type VideoOrientation = "portrait" | "landscape";
+export interface GaussianHtmlView {
+  target: [number, number, number];
+  yaw: number;
+  pitch: number;
+  distance: number;
+  horizontalFrameOffset: number;
+  projection: number;
+  orthoHeight: number;
+  orthographicView: GaussianOrthographicView | null;
+  fov: number;
+  nearClip: number;
+  farClip: number;
+}
+export interface GaussianHtmlExportProgress {
+  exportId: string;
+  phase: "model" | "packing" | "completed";
+  progress: number;
+}
+export interface GaussianHtmlExportResult {
+  path: string;
+  fileSize: number;
+  splatCount: number;
 }
 
 export interface GaussianVideoExportResult {

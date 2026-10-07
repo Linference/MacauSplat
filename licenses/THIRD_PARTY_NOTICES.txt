@@ -2,9 +2,11 @@ MacauSplat — Third-party notices
 ================================
 
 This notice indexes the native engines and preview libraries directly
-distributed with or downloaded by MacauSplat, a derivative work based on
-OOOSplat (https://github.com/ooolabdev/ooosplat, Apache-2.0). Each component
-remains subject to its own license.
+distributed with or downloaded by OOOSplat. Each component remains subject
+to its own license.
+Single-file offline HTML exports embed the same PlayCanvas Engine runtime and
+OOOSplat viewer code. Each exported HTML includes the PlayCanvas MIT license
+and the OOOSplat Apache-2.0 license. Exported model ownership is unchanged.
 For the macOS runtime, BUNDLED-COMPONENTS.json is generated from the dylibs
 actually copied into the release and records their Homebrew formula, declared
 license, homepage, and packaged files. Release verification rejects an
@@ -21,14 +23,14 @@ platform bundle alongside this file.
 
 FFmpeg / FFprobe
 ----------------
-Version/build: n8.1.2-44-g7c533d0f86-20260821
+Version/build: n8.1.3-14-g330caae0c1-20261003
 Distribution: BtbN win64 LGPL shared 8.1
 License: GNU Lesser General Public License v2.1 or later
 SPDX identifier: LGPL-2.1-or-later
 License text: licenses/FFmpeg-LGPL-2.1.txt
 Upstream source: https://ffmpeg.org/download.html
 Build source and scripts: https://github.com/BtbN/FFmpeg-Builds
-Release archive: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-21-13-40/ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip
+Release archive: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-03-18-14/ffmpeg-n8.1.3-14-g330caae0c1-win64-lgpl-shared-8.1.zip
 
 Corresponding source (LGPL-2.1 Section 6 written offer):
 licenses/FFmpeg-CORRESPONDING-SOURCE.txt
@@ -69,32 +71,30 @@ for the Windows build is recorded in licenses/FFmpeg-CORRESPONDING-SOURCE.txt.
 
 COLMAP
 ------
-Release: 4.0.4 Windows x64 CUDA asset
-Binary-reported version: 4.1.0.dev0, commit 5b76f53, with CUDA
+Release: colmap-4.2.1-runtime.1, prebuilt for Windows, Linux and macOS
+Source commit: bd1fcf654d2dd8fefa1466999c190a246f83f4b9
 License: BSD 3-Clause License
 SPDX identifier: BSD-3-Clause
 License text: licenses/COLMAP-LICENSE.txt
-Release source: https://github.com/colmap/colmap/releases/tag/4.0.4
-Commit source: https://github.com/colmap/colmap/tree/5b76f53
-Release archive: https://github.com/colmap/colmap/releases/download/4.0.4/colmap-x64-windows-cuda.zip
+Release source: https://github.com/colmap/colmap/releases/tag/4.2.1
+Commit source: https://github.com/colmap/colmap/tree/bd1fcf654d2dd8fefa1466999c190a246f83f4b9
+Runtime release: https://github.com/ooolabdev/ooosplat-colmap/releases/tag/colmap-4.2.1-runtime.1
+Windows/Linux include Caspar f32 (Symforce-Caspar, Apache-2.0) and Ceres.
+Caspar and dependency notices are packaged under runtime licenses/ and
+listed in BUNDLED-COMPONENTS.json. GUI, OpenGL, MVS, ONNX, CGAL, LSD,
+downloads and test programs are disabled.
 
-COLMAP 4.0.4 macOS arm64 CPU CLI-only distribution: built by this project
-(Linference, the publisher of MacauSplat) from
-https://github.com/colmap/colmap/archive/refs/tags/4.0.4.tar.gz with CUDA, GUI,
-tests, and nonessential OpenGL support disabled. Required redistributable
-libraries are included and relocated inside the application; Homebrew is used
-only on the build runner and is not required by users. Direct build details
-are emitted in BUILD-INFO.json; the exact dylib inventory is emitted in
-BUNDLED-COMPONENTS.json and indexed by engines/manifest.macos.json. The archive
-is published and obtained by the same project-owned path described above under
-FFmpeg: no macOS COLMAP binary is downloaded from the upstream OOOSplat release
-page.
+COLMAP 4.2.1 macOS arm64 CPU CLI-only distribution comes from the same pinned
+ooolabdev/ooosplat-colmap Release, with CUDA, Caspar, GUI, tests and OpenGL
+disabled. Required redistributable libraries, the offline SIFT vocabulary and
+the validation model are included. Direct build details are emitted in
+BUILD-INFO.json; the exact runtime/license inventory is emitted in
+BUNDLED-COMPONENTS.json and indexed by engines/colmap-runtime.json.
 
 NVIDIA CUDA Runtime
 -------------------
-Components: cudart64_12.dll (CUDA Runtime), curand64_10.dll (cuRAND),
-            onnxruntime_providers_cuda.dll (ONNX Runtime CUDA provider)
-Origin: bundled inside the COLMAP 4.0.4 Windows x64 CUDA release asset
+Components: CUDA 13.2.0 Runtime and cuRAND (Windows DLLs/Linux shared libraries)
+Origin: ooolabdev/ooosplat-colmap 4.2.1 Windows/Linux CUDA + Caspar runtime
 License: NVIDIA CUDA Toolkit End User License Agreement — redistributable
          runtime files (Attachment A), unmodified
 License text: licenses/NVIDIA-CUDA-Runtime.txt
@@ -102,14 +102,23 @@ Upstream source: https://docs.nvidia.com/cuda/eula/index.html
 
 Brush
 -----
-Version: v0.3.0
+Version: OOOBrush ooo-v1.0.0 (headless brush-cli 1.0.0)
+Source commit: 866a7d65b4d6a591ba0d52a88f8b20ea3465c1e5
 License: Apache License 2.0
 SPDX identifier: Apache-2.0
 License text: licenses/Brush-LICENSE.txt
-Upstream source: https://github.com/ArthurBrussee/brush/tree/v0.3.0
-Windows x64 release archive: https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-x86_64-pc-windows-msvc.zip
-Ubuntu 24.04 Alpha, Linux x86_64 release archive: https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-x86_64-unknown-linux-gnu.tar.xz
-macOS 15+ Apple Silicon arm64 release archive: https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz
+Fork source: https://github.com/ooolabdev/OOOBrush/tree/866a7d65b4d6a591ba0d52a88f8b20ea3465c1e5
+Original upstream and attribution: https://github.com/ArthurBrussee/brush
+Windows x64 release archive: https://github.com/ooolabdev/OOOBrush/releases/download/ooo-v1.0.0/OOOBrush-x86_64-pc-windows-msvc.zip
+Ubuntu 24.04 Alpha, Linux x86_64 release archive: https://github.com/ooolabdev/OOOBrush/releases/download/ooo-v1.0.0/OOOBrush-x86_64-unknown-linux-gnu.tar.gz
+macOS 15+ Apple Silicon arm64 release archive: https://github.com/ooolabdev/OOOBrush/releases/download/ooo-v1.0.0/OOOBrush-aarch64-apple-darwin.tar.gz
+Only brush-cli is installed, aliased to brush_app(.exe) for path compatibility.
+The viewer executable is excluded. Each runtime retains the release LICENSE,
+BUILDINFO.json, UPSTREAM-README.md, UPSTREAM-SHA256SUMS (source archive only),
+and INSTALL-INFO.json recording the original binary and installed alias.
+The release binaries are unsigned/not notarized; macOS application packaging
+uses the existing signing policy. GPU training acceptance is not implied by
+CLI version/help smoke tests.
 
 PlayCanvas Engine
 -----------------
@@ -155,6 +164,15 @@ SPDX identifier: MPL-2.0
 License text: licenses/Mediabunny-MPL-2.0.txt
 Upstream source: https://github.com/Vanilagy/mediabunny/tree/v1.52.3
 Distributed source package: https://www.npmjs.com/package/mediabunny/v/1.52.3
+
+Tauri single-instance plugin
+----------------------------
+Version: 2.4.5
+Use: Prevent a second desktop application process and focus the existing window.
+License: Apache License 2.0 OR MIT License
+Selected distribution license: Apache-2.0
+License text: LICENSE
+Upstream source: https://crates.io/crates/tauri-plugin-single-instance/2.4.5
 
 image crate
 -----------

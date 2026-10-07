@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential colmap curl ffmpeg file libvulkan1 mesa-vulkan-drivers \
+            build-essential curl ffmpeg file libvulkan1 mesa-vulkan-drivers \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
 
@@ -53,34 +53,45 @@ jobs:
         run: |
           npm run verify:telemetry:release
           npm test
+          npm run test:engine-scripts
+          npm run verify:colmap-lock
           npm run build
+          npm run verify:bundle-resources
 
       - name: Verify license metadata and mappings
         run: npm run verify:licenses
 
-      # Linux uses the system ffmpeg/ffprobe/colmap plus the pinned Brush archive.
-      # `npm run setup:engines` / `verify:engines` dispatch to the *macOS* bash
-      # scripts on darwin/linux alike (see scripts/engine-command.mjs) and those
-      # hard-fail off Apple Silicon, so the Linux variants must be called
-      # explicitly here.
-      - name: Install and verify bundled Brush
+      - name: Install and verify pinned COLMAP and Brush
         run: |
-          npm run setup:engines:linux
-          npm run verify:engines:linux
+          npm run setup:engines
+          npm run verify:engines
+          node scripts/smoke-colmap-image-io.mjs engines/linux/colmap/bin/colmap
 
-      # REQUIRED before `tauri build`: bundle.externalBin declares
-      # binaries/splatstudio, tauri-build fails hard when the staged CLI is
-      # missing, and the file is gitignored. Keep this before the Rust/build
-      # steps. Note that tauri.conf.json's beforeBuildCommand is
-      # `npm run build:bundle:linux`, which does NOT stage the CLI.
-      - name: Stage CLI for externalBin
-        run: npm run stage:cli
+      - name: Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-      - name: Rust formatting, tests, and clippy
+      - name: Rust tests
+        shell: bash
         run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          set -o pipefail
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml 2>&1 | tee rust-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            summary="$(awk '/^failures:/{capture=1} capture' rust-test.log | tail -n 80)"
+            if [[ -z "$summary" ]]; then
+              summary="$(tail -n 80 rust-test.log)"
+            fi
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Rust tests failed::$summary"
+          fi
+          exit "$status"
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: FFmpeg CLI integration
         run: |
@@ -107,16 +118,17 @@ jobs:
           test "$actual_version" = "$expected_version"
           dependencies="$(dpkg-deb --field "$package" Depends)"
           grep -Eq '(^|, )ffmpeg([ ,]|$)' <<<"$dependencies"
-          grep -Eq '(^|, )colmap([ ,]|$)' <<<"$dependencies"
+          ! grep -Eq '(^|, )colmap([ ,]|$)' <<<"$dependencies"
           extracted="$(mktemp -d)"
           trap 'rm -rf -- "$extracted"' EXIT
           dpkg-deb --extract "$package" "$extracted"
           test -n "$(find "$extracted" -type f -name ooo-splat -perm -111 -print -quit)"
           test -n "$(find "$extracted" -type f -path '*/engines/linux/brush/brush_app' -perm -111 -print -quit)"
+          test -n "$(find "$extracted" -type f -path '*/engines/linux/colmap/bin/colmap' -perm -111 -print -quit)"
           test -n "$(find "$extracted" -type f -path '*/engines/manifest.linux.json' -print -quit)"
-          # bundle.externalBin declares binaries/splatstudio, so the staged CLI
-          # must actually land inside the deb next to the main executable.
-          test -n "$(find "$extracted" -type f -name splatstudio -perm -111 -print -quit)"
+          test -n "$(find "$extracted" -type f -path '*/engines/linux/colmap/lib/colmap/vocab_tree_faiss_flickr100K_words256K.bin' -print -quit)"
+          test -n "$(find "$extracted" -type f -path '*/engines/linux/colmap/BUILD-INFO.json' -print -quit)"
+          test -n "$(find "$extracted" -type f -path '*/engines/linux/colmap/BUNDLED-COMPONENTS.json' -print -quit)"
           dpkg-deb --info "$package"
 
       - name: Package downloadable files

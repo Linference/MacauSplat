@@ -1,6 +1,6 @@
 [package]
 name = "ooo-splat"
-version = "0.4.1"
+version = "0.6.0"
 description = "Local video-to-Gaussian-Splatting pipeline for Windows, Apple Silicon macOS Alpha, and Ubuntu 24.04 Alpha"
 authors = ["Linference", "ooolabdev"]
 license = "Apache-2.0"
@@ -9,10 +9,9 @@ homepage = "https://github.com/Linference/MacauSplat"
 edition = "2021"
 default-run = "ooo-splat"
 
-[package.metadata.upstream]
-name = "OOOSplat"
-repository = "https://github.com/ooolabdev/ooosplat"
-license = "Apache-2.0"
+[features]
+default = []
+local-colmap = []
 
 [lib]
 name = "ooo_splat"
@@ -30,16 +29,25 @@ path = "src/bin/splatstudio.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+axum = { version = "=0.8.9", features = ["json"] }
+schemars = "1"
+getrandom = "0.3"
+sha2 = "0.10"
+hmac = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7"
@@ -63,3 +71,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false }

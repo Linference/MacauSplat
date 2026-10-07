@@ -8,6 +8,22 @@ use crate::{
     process::{ProcessManager, ProcessObserver, ProcessSpec},
 };
 
+pub const LOCKED_VERSION: &str = "4.2.1";
+pub const LOCKED_COMMIT: &str = "bd1fcf654d2dd8fefa1466999c190a246f83f4b9";
+
+pub fn is_locked_build(help: &str) -> bool {
+    let short_commit = &LOCKED_COMMIT[..7];
+    [LOCKED_COMMIT, short_commit].into_iter().any(|commit| {
+        let marker = format!("COLMAP {LOCKED_VERSION} (Commit {commit}");
+        help.match_indices(&marker).any(|(index, _)| {
+            help[index + marker.len()..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_whitespace() || character == ')')
+        })
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ColmapCliFamily {
@@ -42,15 +58,6 @@ pub fn detect_cli_family(feature_help: &str, matching_help: &str) -> Option<Colm
 ///
 /// 用途：`--Mapper.snapshot_*` 這類選項在舊版 COLMAP 不存在，直接加會讓 mapper 失敗；
 /// 因此先問 help，只有確定支援才附加。任何查詢失敗都回傳 `false`（保守：不改變既有行為）。
-async fn colmap_supports_option(
-    executable: &Path,
-    command_name: &str,
-    option: &str,
-) -> Result<bool> {
-    let help = command_help(executable, command_name, &ProcessManager::new()).await?;
-    Ok(help.contains(option))
-}
-
 async fn command_help(
     executable: &Path,
     command_name: &str,
@@ -152,11 +159,117 @@ async fn run_colmap(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn run_mapper_with_ceres_fallback(
+    executable: &Path,
+    caspar_args: Vec<OsString>,
+    mut ceres_args: Vec<OsString>,
+    output: &Path,
+    working_directory: &Path,
+    log_path: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    selection: &super::colmap_ba::BaSelection,
+) -> Result<()> {
+    let result = run_colmap(
+        executable,
+        caspar_args,
+        working_directory,
+        log_path.clone(),
+        manager,
+        observer.clone(),
+    )
+    .await;
+    let Some(index) = selection.gpu_index else {
+        return result;
+    };
+    let caspar_error = match result {
+        Ok(()) => return Ok(()),
+        Err(error) if should_retry_mapper_with_ceres(selection, &error) => error,
+        Err(error) => return Err(error),
+    };
+
+    super::colmap_ba::disable_after_runtime_failure(
+        executable,
+        index,
+        "Caspar mapper process failed; Ceres fallback activated",
+    )
+    .await;
+    append_log(
+        &log_path,
+        &format!(
+            "[OOOSplat] Global Caspar mapper failed; resetting mapper output and retrying once with local/global Ceres: {caspar_error}\n"
+        ),
+    )
+    .await?;
+    tracing::warn!(
+        "Global Caspar mapper failed on GPU {}; retrying once with Ceres: {}",
+        index,
+        caspar_error
+    );
+    reset_mapper_output(output).await?;
+    super::colmap_ba::append_explicit_ceres_options(&mut ceres_args);
+    match run_colmap(
+        executable,
+        ceres_args,
+        working_directory,
+        log_path.clone(),
+        manager,
+        observer,
+    )
+    .await
+    {
+        Ok(()) => {
+            append_log(
+                &log_path,
+                "[OOOSplat] Ceres fallback completed successfully; Caspar is disabled for this engine/GPU for the remainder of the application process.\n",
+            )
+            .await?;
+            Ok(())
+        }
+        Err(ceres_error) => Err(SplatError::Process(format!(
+            "Caspar mapper failed and the automatic Ceres retry also failed.\nCaspar: {caspar_error}\nCeres: {ceres_error}"
+        ))),
+    }
+}
+
+async fn reset_mapper_output(output: &Path) -> Result<()> {
+    if output.exists() {
+        tokio::fs::remove_dir_all(output).await?;
+    }
+    tokio::fs::create_dir_all(output).await?;
+    Ok(())
+}
+
+fn should_retry_mapper_with_ceres(
+    selection: &super::colmap_ba::BaSelection,
+    error: &SplatError,
+) -> bool {
+    selection.gpu_index.is_some() && matches!(error, SplatError::Process(_))
+}
+
+async fn append_log(path: &Path, message: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?
+        .write_all(message.as_bytes())
+        .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn extract_features(
     executable: &Path,
     database: &Path,
     images: &Path,
     masks: Option<&Path>,
+    max_image_size: Option<u32>,
+    max_features: Option<u32>,
     log: PathBuf,
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
@@ -172,6 +285,83 @@ pub async fn extract_features(
             gpu_index,
             use_gpu_option,
             gpu_index_option,
+            max_image_size,
+            max_features,
+            None,
+        ),
+        database.parent().unwrap_or(images),
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn extract_features_quality_v2(
+    executable: &Path,
+    database: &Path,
+    images: &Path,
+    masks: Option<&Path>,
+    image_list: Option<&Path>,
+    max_image_size: u32,
+    max_features: u32,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    let (use_gpu_option, gpu_index_option) = feature_gpu_options(executable, manager).await?;
+    run_colmap(
+        executable,
+        feature_extraction_args(
+            database,
+            images,
+            masks,
+            gpu_index,
+            use_gpu_option,
+            gpu_index_option,
+            Some(max_image_size),
+            Some(max_features),
+            image_list,
+        ),
+        database.parent().unwrap_or(images),
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn extract_incremental_features(
+    executable: &Path,
+    database: &Path,
+    images: &Path,
+    image_list: &Path,
+    existing_camera_id: u32,
+    masks: Option<&Path>,
+    max_image_size: Option<u32>,
+    max_features: Option<u32>,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    let (use_gpu_option, gpu_index_option) = feature_gpu_options(executable, manager).await?;
+    run_colmap(
+        executable,
+        incremental_feature_extraction_args(
+            database,
+            images,
+            image_list,
+            existing_camera_id,
+            masks,
+            gpu_index,
+            use_gpu_option,
+            gpu_index_option,
+            max_image_size,
+            max_features,
         ),
         database.parent().unwrap_or(images),
         log,
@@ -229,6 +419,43 @@ pub async fn match_exhaustive(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn match_pairs(
+    executable: &Path,
+    database: &Path,
+    pair_list: &Path,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    let (use_gpu_option, gpu_index_option) =
+        matching_gpu_options(executable, "matches_importer", manager).await?;
+    let mut args = matching_args(
+        "matches_importer",
+        database,
+        gpu_index,
+        use_gpu_option,
+        gpu_index_option,
+    );
+    args.extend([
+        "--match_list_path".into(),
+        pair_list.into(),
+        "--match_type".into(),
+        "pairs".into(),
+    ]);
+    run_colmap(
+        executable,
+        args,
+        database.parent().unwrap_or(Path::new(".")),
+        log,
+        manager,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 fn feature_extraction_args(
     database: &Path,
     images: &Path,
@@ -236,6 +463,9 @@ fn feature_extraction_args(
     gpu_index: Option<u32>,
     use_gpu_option: &str,
     gpu_index_option: &str,
+    max_image_size: Option<u32>,
+    max_features: Option<u32>,
+    image_list: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args = vec![
         "feature_extractor".into(),
@@ -250,6 +480,74 @@ fn feature_extraction_args(
         use_gpu_option.into(),
         (if gpu_index.is_some() { "1" } else { "0" }).into(),
     ];
+    append_feature_extraction_limits(&mut args, use_gpu_option, max_image_size, max_features);
+    if let Some(index) = gpu_index {
+        args.push(gpu_index_option.into());
+        args.push(index.to_string().into());
+    }
+    if let Some(masks) = masks {
+        args.push("--ImageReader.mask_path".into());
+        args.push(masks.into());
+    }
+    if let Some(image_list) = image_list {
+        args.push("--image_list_path".into());
+        args.push(image_list.into());
+    }
+    args
+}
+
+fn append_feature_extraction_limits(
+    args: &mut Vec<OsString>,
+    use_gpu_option: &str,
+    max_image_size: Option<u32>,
+    max_features: Option<u32>,
+) {
+    if let Some(max_image_size) = max_image_size {
+        let max_image_size_option = if use_gpu_option.starts_with("--FeatureExtraction") {
+            "--FeatureExtraction.max_image_size"
+        } else {
+            "--SiftExtraction.max_image_size"
+        };
+        args.extend([
+            max_image_size_option.into(),
+            max_image_size.to_string().into(),
+        ]);
+    }
+    if let Some(max_features) = max_features {
+        args.extend([
+            "--SiftExtraction.max_num_features".into(),
+            max_features.to_string().into(),
+        ]);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn incremental_feature_extraction_args(
+    database: &Path,
+    images: &Path,
+    image_list: &Path,
+    existing_camera_id: u32,
+    masks: Option<&Path>,
+    gpu_index: Option<u32>,
+    use_gpu_option: &str,
+    gpu_index_option: &str,
+    max_image_size: Option<u32>,
+    max_features: Option<u32>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        "feature_extractor".into(),
+        "--database_path".into(),
+        database.into(),
+        "--image_path".into(),
+        images.into(),
+        "--image_list_path".into(),
+        image_list.into(),
+        "--ImageReader.existing_camera_id".into(),
+        existing_camera_id.to_string().into(),
+        use_gpu_option.into(),
+        (if gpu_index.is_some() { "1" } else { "0" }).into(),
+    ];
+    append_feature_extraction_limits(&mut args, use_gpu_option, max_image_size, max_features);
     if let Some(index) = gpu_index {
         args.push(gpu_index_option.into());
         args.push(index.to_string().into());
@@ -302,95 +600,235 @@ fn matching_args(
     args
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn map(
     executable: &Path,
     database: &Path,
     images: &Path,
     output: &Path,
+    allow_two_view_tracks: bool,
+    automatic_optimization: bool,
     log: PathBuf,
     manager: &ProcessManager,
     observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(output).await?;
-    let mut args: Vec<OsString> = vec![
+    let mut ceres_args = mapper_args(database, images, None, output, allow_two_view_tracks);
+    if let Ok(help)=command_help(executable,"mapper",manager).await{
+        let frequency=if help.contains("--Mapper.snapshot_frames_freq"){Some("--Mapper.snapshot_frames_freq")}else if help.contains("--Mapper.snapshot_images_freq"){Some("--Mapper.snapshot_images_freq")}else{None};
+        if let Some(option)=frequency.filter(|_|help.contains("--Mapper.snapshot_path")){
+            let snapshots=output.join("snapshots");tokio::fs::create_dir_all(&snapshots).await?;
+            ceres_args.extend(["--Mapper.snapshot_path".into(),snapshots.into(),option.into(),"15".into()]);
+        }
+    }
+    let (args, selection) = with_ba(
+        executable,
+        database,
+        ceres_args.clone(),
+        gpu_index,
+        automatic_optimization,
+        &log,
+    )
+    .await?;
+    run_mapper_with_ceres_fallback(
+        executable,
+        args,
+        ceres_args,
+        output,
+        database.parent().unwrap_or(output),
+        log,
+        manager,
+        observer,
+        &selection,
+    )
+    .await
+}
+
+/// Continues the Incremental Mapper from an existing sparse model. The
+/// baseline model is never overwritten; COLMAP writes the continued model to
+/// a separate output directory so the caller can safely roll back.
+#[allow(clippy::too_many_arguments)]
+pub async fn map_from_existing(
+    executable: &Path,
+    database: &Path,
+    images: &Path,
+    input_model: &Path,
+    output: &Path,
+    automatic_optimization: bool,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    tokio::fs::create_dir_all(output).await?;
+    let ceres_args = mapper_args(database, images, Some(input_model), output, false);
+    let (args, selection) = with_ba(
+        executable,
+        database,
+        ceres_args.clone(),
+        gpu_index,
+        automatic_optimization,
+        &log,
+    )
+    .await?;
+    run_mapper_with_ceres_fallback(
+        executable,
+        args,
+        ceres_args,
+        output,
+        database.parent().unwrap_or(output),
+        log,
+        manager,
+        observer,
+        &selection,
+    )
+    .await
+}
+
+fn mapper_args(
+    database: &Path,
+    images: &Path,
+    input_model: Option<&Path>,
+    output: &Path,
+    allow_two_view_tracks: bool,
+) -> Vec<OsString> {
+    let mut args = vec![
         "mapper".into(),
         "--database_path".into(),
         database.into(),
         "--image_path".into(),
         images.into(),
-        "--output_path".into(),
-        output.into(),
     ];
-    // 中間快照：讓外部監視工具能在建圖過程中看到「點雲正在長大」，而不必等整個重建結束。
-    //
-    // 這裡有個真實踩過的坑：**選項名稱隨 COLMAP 版本改變**。
-    //   COLMAP 3.x：--Mapper.snapshot_images_freq
-    //   COLMAP 4.x：--Mapper.snapshot_frames_freq（本專案隨附的 4.1.0 用這個）
-    // 傳錯名稱不是「快照功能失效」，而是 **mapper 直接以 exit code 1 結束、整條重建中斷**，
-    // 因此兩個名稱都要探測，且探測失敗必須留下紀錄（不可靜默略過）。
-    let snapshot_dir = snapshot_directory(output);
-    let path_ok = snapshot_dir.is_some()
-        && colmap_supports_option(executable, "mapper", "--Mapper.snapshot_path")
-            .await
-            .unwrap_or(false);
-    let freq_option = if path_ok {
-        if colmap_supports_option(executable, "mapper", "--Mapper.snapshot_frames_freq")
-            .await
-            .unwrap_or(false)
-        {
-            Some("--Mapper.snapshot_frames_freq")
-        } else if colmap_supports_option(executable, "mapper", "--Mapper.snapshot_images_freq")
-            .await
-            .unwrap_or(false)
-        {
-            Some("--Mapper.snapshot_images_freq")
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    match (snapshot_dir, freq_option) {
-        (Some(dir), Some(option)) => {
-            let _ = tokio::fs::create_dir_all(&dir).await;
-            args.push("--Mapper.snapshot_path".into());
-            args.push(dir.into());
-            args.push(option.into());
-            args.push(OsString::from("10"));
-        }
-        _ => {
-            // 明確記錄，否則使用者只會看到「點雲檢視器永遠沒有內容」而無從得知原因
-            tracing::warn!(
-                "此 COLMAP 不支援 Mapper 中間快照（找不到 snapshot_path 或 snapshot_frames_freq），建圖過程將不產生快照"
-            );
-        }
+    if let Some(input_model) = input_model {
+        args.push("--input_path".into());
+        args.push(input_model.into());
+        args.push("--Mapper.multiple_models".into());
+        args.push("0".into());
     }
-    run_colmap(
+    args.push("--output_path".into());
+    args.push(output.into());
+    if allow_two_view_tracks {
+        args.push("--Mapper.tri_ignore_two_view_tracks".into());
+        args.push("0".into());
+    }
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn map_incremental(
+    executable: &Path,
+    database: &Path,
+    images: &Path,
+    input: &Path,
+    output: &Path,
+    image_list: &Path,
+    automatic_optimization: bool,
+    log: PathBuf,
+    manager: &ProcessManager,
+    observer: Option<ProcessObserver>,
+    gpu_index: Option<u32>,
+) -> Result<()> {
+    tokio::fs::create_dir_all(output).await?;
+    let ceres_args = incremental_mapper_args(database, images, input, output, image_list);
+    let (args, selection) = with_ba(
+        executable,
+        database,
+        ceres_args.clone(),
+        gpu_index,
+        automatic_optimization,
+        &log,
+    )
+    .await?;
+    run_mapper_with_ceres_fallback(
         executable,
         args,
+        ceres_args,
+        output,
         database.parent().unwrap_or(output),
         log,
         manager,
         observer,
+        &selection,
     )
     .await
 }
 
-/// 中間快照的目錄名稱（放在稀疏模型目錄底下，與最終模型 `0/` 分開）。
-///
-/// 為什麼是常數：`pipeline::runner` 挑選「最終稀疏模型」時必須**排除**這個目錄，
-/// 否則正在長大的中間快照可能被當成最終模型餵給 Brush 訓練。
-/// 兩邊共用同一個字串，才不會有一邊改了名字、另一邊還在用舊名字。
-pub const SNAPSHOT_DIRECTORY_NAME: &str = "snapshots";
+async fn with_ba(
+    executable: &Path,
+    database: &Path,
+    mut args: Vec<OsString>,
+    gpu_index: Option<u32>,
+    automatic_optimization: bool,
+    log: &Path,
+) -> Result<(Vec<OsString>, super::colmap_ba::BaSelection)> {
+    let selection = super::colmap_ba::select_for_mapper(
+        executable,
+        database,
+        gpu_index,
+        automatic_optimization,
+    )
+    .await;
+    super::colmap_ba::append_mapper_options(&mut args, &selection);
+    append_log(log, &format!("[OOOSplat] {}\n", selection.detail)).await?;
+    tracing::info!("{}", selection.detail);
+    Ok((args, selection))
+}
 
-/// 中間快照的輸出目錄（與最終稀疏模型分開，避免污染 `sparse/0`）。
-pub fn snapshot_directory(output: &Path) -> Option<PathBuf> {
-    Some(output.join(SNAPSHOT_DIRECTORY_NAME))
+fn incremental_mapper_args(
+    database: &Path,
+    images: &Path,
+    input: &Path,
+    output: &Path,
+    image_list: &Path,
+) -> Vec<OsString> {
+    vec![
+        "mapper".into(),
+        "--database_path".into(),
+        database.into(),
+        "--image_path".into(),
+        images.into(),
+        "--input_path".into(),
+        input.into(),
+        "--output_path".into(),
+        output.into(),
+        "--Mapper.image_list_path".into(),
+        image_list.into(),
+        "--Mapper.fix_existing_frames".into(),
+        "1".into(),
+        "--Mapper.ba_refine_focal_length".into(),
+        "0".into(),
+        "--Mapper.ba_refine_principal_point".into(),
+        "0".into(),
+        "--Mapper.ba_refine_extra_params".into(),
+        "0".into(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_runtime_identity_matches_the_shared_build_lock() {
+        let lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../../engines/colmap-build.json")).unwrap();
+        assert_eq!(lock["commit"], LOCKED_COMMIT);
+        assert_eq!(lock["version"], LOCKED_VERSION);
+        assert!(is_locked_build(&format!(
+            "COLMAP {LOCKED_VERSION} (Commit {LOCKED_COMMIT})"
+        )));
+        assert!(is_locked_build(
+            "COLMAP 4.2.1 (Commit bd1fcf6 on 2026-09-29 with CUDA, std hash maps)"
+        ));
+        assert!(!is_locked_build(
+            "COLMAP 4.2.1 (Commit bd1fcf60 on 2026-09-29 with CUDA, std hash maps)"
+        ));
+        assert!(!is_locked_build(
+            "COLMAP 4.2.1 (Commit 0000000 on 2026-09-29 with CUDA, std hash maps)"
+        ));
+        assert!(!is_locked_build("COLMAP 4.1.0.dev0 (Commit 5b76f53)"));
+    }
 
     fn strings(args: Vec<OsString>) -> Vec<String> {
         args.into_iter()
@@ -407,6 +845,9 @@ mod tests {
             Some(2),
             "--FeatureExtraction.use_gpu",
             "--FeatureExtraction.gpu_index",
+            None,
+            None,
+            None,
         ));
         assert!(extraction
             .windows(2)
@@ -438,6 +879,9 @@ mod tests {
             None,
             "--FeatureExtraction.use_gpu",
             "--FeatureExtraction.gpu_index",
+            None,
+            None,
+            None,
         ));
         assert!(extraction
             .windows(2)
@@ -503,6 +947,9 @@ mod tests {
             Some(0),
             "--SiftExtraction.use_gpu",
             "--SiftExtraction.gpu_index",
+            None,
+            None,
+            None,
         ));
         assert!(extraction
             .windows(2)
@@ -516,14 +963,232 @@ mod tests {
     fn transparent_input_passes_the_colmap_mask_root() {
         let extraction = strings(feature_extraction_args(
             Path::new("database.db"),
-            Path::new("../frames"),
+            Path::new("../colmap_frames"),
             Some(Path::new("../masks")),
             None,
             "--FeatureExtraction.use_gpu",
             "--FeatureExtraction.gpu_index",
+            None,
+            None,
+            None,
         ));
         assert!(extraction
             .windows(2)
             .any(|pair| pair == ["--ImageReader.mask_path", "../masks"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--image_path", "../colmap_frames"]));
+    }
+
+    #[test]
+    fn quality_v2_feature_limits_and_image_list_reach_colmap() {
+        let extraction = strings(feature_extraction_args(
+            Path::new("database.db"),
+            Path::new("frames"),
+            None,
+            None,
+            "--FeatureExtraction.use_gpu",
+            "--FeatureExtraction.gpu_index",
+            Some(1600),
+            Some(4096),
+            Some(Path::new("bridge-images.txt")),
+        ));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "4096"]));
+        assert!(extraction
+            .windows(2)
+            .any(|pair| pair == ["--image_list_path", "bridge-images.txt"]));
+    }
+
+    #[test]
+    fn image_size_only_limit_preserves_default_feature_count_for_both_cli_families() {
+        for (use_gpu_option, gpu_index_option, expected_image_option) in [
+            (
+                "--FeatureExtraction.use_gpu",
+                "--FeatureExtraction.gpu_index",
+                "--FeatureExtraction.max_image_size",
+            ),
+            (
+                "--SiftExtraction.use_gpu",
+                "--SiftExtraction.gpu_index",
+                "--SiftExtraction.max_image_size",
+            ),
+        ] {
+            let extraction = strings(feature_extraction_args(
+                Path::new("database.db"),
+                Path::new("frames"),
+                None,
+                None,
+                use_gpu_option,
+                gpu_index_option,
+                Some(1200),
+                None,
+                None,
+            ));
+            assert!(extraction
+                .windows(2)
+                .any(|pair| pair == [expected_image_option, "1200"]));
+            assert!(!extraction
+                .iter()
+                .any(|arg| arg == "--SiftExtraction.max_num_features"));
+        }
+    }
+
+    #[test]
+    fn incremental_mapper_arguments_include_the_baseline_model() {
+        let args = strings(mapper_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            Some(Path::new("sparse/0")),
+            Path::new("sparse-bridge"),
+            false,
+        ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--input_path", "sparse/0"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--Mapper.multiple_models", "0"]));
+        assert_eq!(args[0], "mapper");
+        assert!(!args.iter().any(|arg| arg == "global_mapper"));
+    }
+
+    #[test]
+    fn high_mapper_can_triangulate_two_view_tracks() {
+        let args = strings(mapper_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            None,
+            Path::new("sparse"),
+            true,
+        ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--Mapper.tri_ignore_two_view_tracks", "0"]));
+
+        let default_args = strings(mapper_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            None,
+            Path::new("sparse"),
+            false,
+        ));
+        assert!(!default_args
+            .iter()
+            .any(|arg| arg == "--Mapper.tri_ignore_two_view_tracks"));
+    }
+
+    #[test]
+    fn incremental_features_reuse_the_existing_camera_and_only_new_images() {
+        let args = strings(incremental_feature_extraction_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            Path::new("reshoot-images.txt"),
+            7,
+            Some(Path::new("../reshoot-masks")),
+            Some(0),
+            "--FeatureExtraction.use_gpu",
+            "--FeatureExtraction.gpu_index",
+            Some(1600),
+            Some(8192),
+        ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--image_list_path", "reshoot-images.txt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--ImageReader.existing_camera_id", "7"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--FeatureExtraction.max_image_size", "1600"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "8192"]));
+        assert!(!args.iter().any(|arg| arg == "--ImageReader.single_camera"));
+    }
+
+    #[test]
+    fn incremental_feature_limits_support_the_legacy_cli_family() {
+        let args = strings(incremental_feature_extraction_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            Path::new("reshoot-images.txt"),
+            3,
+            None,
+            None,
+            "--SiftExtraction.use_gpu",
+            "--SiftExtraction.gpu_index",
+            Some(2000),
+            Some(16384),
+        ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_image_size", "2000"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--SiftExtraction.max_num_features", "16384"]));
+    }
+
+    #[test]
+    fn incremental_mapper_keeps_existing_frames_and_intrinsics_fixed() {
+        let args = strings(incremental_mapper_args(
+            Path::new("database.db"),
+            Path::new("../colmap_frames"),
+            Path::new("base-model"),
+            Path::new("incremental-model"),
+            Path::new("mapper-images.txt"),
+        ));
+        for pair in [
+            ["--Mapper.fix_existing_frames", "1"],
+            ["--Mapper.ba_refine_focal_length", "0"],
+            ["--Mapper.ba_refine_principal_point", "0"],
+            ["--Mapper.ba_refine_extra_params", "0"],
+        ] {
+            assert!(args.windows(2).any(|window| window == pair));
+        }
+    }
+
+    #[test]
+    fn only_a_failed_caspar_mapper_process_triggers_the_ceres_retry() {
+        let caspar = super::super::colmap_ba::BaSelection {
+            gpu_index: Some(0),
+            detail: String::new(),
+        };
+        let ceres = super::super::colmap_ba::BaSelection {
+            gpu_index: None,
+            detail: String::new(),
+        };
+        assert!(should_retry_mapper_with_ceres(
+            &caspar,
+            &SplatError::Process("Caspar solver failed".into())
+        ));
+        assert!(!should_retry_mapper_with_ceres(
+            &ceres,
+            &SplatError::Process("Ceres solver failed".into())
+        ));
+        assert!(!should_retry_mapper_with_ceres(
+            &caspar,
+            &SplatError::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn ceres_retry_discards_partial_mapper_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("sparse");
+        tokio::fs::create_dir_all(output.join("0")).await.unwrap();
+        tokio::fs::write(output.join("0/partial.bin"), b"partial")
+            .await
+            .unwrap();
+        reset_mapper_output(&output).await.unwrap();
+        assert!(output.is_dir());
+        assert!(!output.join("0/partial.bin").exists());
     }
 }
+
+pub const SNAPSHOT_DIRECTORY_NAME:&str="snapshots";
+pub fn snapshot_directory(output:&Path)->Option<PathBuf>{Some(output.join(SNAPSHOT_DIRECTORY_NAME))}
